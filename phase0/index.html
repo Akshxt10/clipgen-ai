@@ -1,0 +1,1005 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<meta name="color-scheme" content="dark">
+<title>ClipGen AI · Phase 0 Test</title>
+<!--
+  ClipGen AI — Phase 0: FFmpeg.wasm feasibility test.
+  Standalone page. It shares NOTHING with the main app: no imports, no service worker, no storage
+  except one tiny localStorage flag used to detect a crashed run.
+  Embedded font: Poppins Bold (subset), SIL Open Font License 1.1, (c) The Poppins Project Authors.
+-->
+<style>
+:root{
+  --bg:#0b0d12; --card:#141822; --line:#262c3a; --text:#e8ecf4; --mute:#99a2b6;
+  --accent:#6ea8ff; --ok:#3ddc97; --warn:#ffc857; --bad:#ff6b6b;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--bg); color:var(--text);
+  font:16px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,Segoe UI,Roboto,sans-serif;
+  padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(40px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));
+}
+main{max-width:640px;margin:0 auto}
+h1{font-size:22px;margin:4px 0 2px}
+h2{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:0 0 10px}
+.sub{color:var(--mute);margin:0 0 16px;font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin:0 0 14px}
+.btn{
+  appearance:none;-webkit-appearance:none;border:0;border-radius:12px;min-height:50px;width:100%;
+  font-weight:600;font-size:16px;line-height:1.2;font-family:inherit;color:#06101f;background:var(--accent);padding:14px 16px;margin:6px 0 0;cursor:pointer;
+}
+.btn.secondary{background:#232a3a;color:var(--text)}
+.btn.danger{background:#3a2226;color:#ffb3b3}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+label{display:block;font-size:14px;color:var(--mute);margin:10px 0 4px}
+input[type=file],input[type=number],select{
+  width:100%;min-height:46px;border-radius:10px;border:1px solid var(--line);background:#0f131b;color:var(--text);
+  font-size:16px;font-family:inherit;padding:10px;
+}
+.note{font-size:13px;color:var(--mute);margin:8px 0 0}
+.banner{border-radius:12px;padding:12px 14px;margin:0 0 14px;font-size:14px;border:1px solid}
+.banner.warn{background:#2b2411;border-color:#6b5a1d;color:#ffe29a}
+.banner.bad{background:#2d1417;border-color:#7a2a33;color:#ffb3b3}
+.banner.ok{background:#112a20;border-color:#1f6b4a;color:#a8f0cf}
+.banner b{display:block;font-size:17px;margin-bottom:2px}
+.bar{height:12px;background:#0f131b;border:1px solid var(--line);border-radius:99px;overflow:hidden;margin:6px 0}
+.bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#4f8cff,#6ea8ff);transition:width .2s}
+.plabel{display:flex;justify-content:space-between;gap:10px;font-size:14px}
+.plabel span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ol.steps{list-style:none;margin:12px 0 0;padding:0}
+ol.steps li{display:grid;grid-template-columns:26px 1fr auto;gap:2px 8px;padding:8px 0;border-top:1px solid var(--line);align-items:start}
+ol.steps li:first-child{border-top:0}
+.ico{font-weight:700;text-align:center;color:var(--mute)}
+li.run .ico{color:var(--accent);animation:spin 1s linear infinite;display:inline-block}
+li.ok .ico{color:var(--ok)} li.warn .ico{color:var(--warn)} li.fail .ico{color:var(--bad)} li.skip .ico{color:var(--mute)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.tm{font-size:13px;color:var(--mute);font-variant-numeric:tabular-nums}
+.det{grid-column:2 / 4;font-size:13px;color:var(--mute);white-space:pre-wrap;word-break:break-word}
+li.fail .det{color:#ffb3b3} li.warn .det{color:#ffe29a}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td{padding:6px 0;border-top:1px solid var(--line);vertical-align:top}
+tr:first-child td{border-top:0}
+td:first-child{color:var(--mute);padding-right:10px;width:46%}
+td.v-ok{color:var(--ok)} td.v-bad{color:var(--bad)} td.v-warn{color:var(--warn)}
+video,img.frame{width:100%;max-height:70vh;background:#000;border-radius:10px;display:block;margin:8px 0;object-fit:contain}
+textarea{width:100%;min-height:200px;border-radius:10px;border:1px solid var(--line);background:#0f131b;color:var(--text);font:12px/1.4 ui-monospace,Menlo,monospace;padding:10px}
+pre#log{max-height:260px;overflow:auto;font:11px/1.35 ui-monospace,Menlo,monospace;background:#0f131b;border:1px solid var(--line);border-radius:10px;padding:8px;white-space:pre-wrap;word-break:break-all;margin:8px 0 0}
+details summary{cursor:pointer;padding:6px 0;font-weight:600}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<main>
+  <h1>ClipGen AI · Phase 0</h1>
+  <p class="sub">FFmpeg.wasm test · single-thread core · 10 s · 9:16 · 720×1280 · burned-in captions</p>
+
+  <div id="crashBanner" class="banner bad hidden"></div>
+
+  <section class="card">
+    <h2>1 · Run the test</h2>
+    <button id="btnRun" class="btn">▶ Run full test (built-in video)</button>
+    <p class="note">No file needed. Takes roughly 1–4 minutes on a phone the first time (downloads ~32&nbsp;MB once). Keep this tab open and the screen on.</p>
+
+    <details style="margin-top:12px">
+      <summary>Test with my own video (optional, do this second)</summary>
+      <label for="file">Video file (a 1080p clip under ~200&nbsp;MB is a good first try)</label>
+      <input id="file" type="file" accept="video/*,.mp4,.mov,.m4v,.mkv,.webm">
+      <div class="row">
+        <div><label for="startSec">Start at (seconds)</label><input id="startSec" type="number" min="0" step="1" value="0" inputmode="numeric"></div>
+        <div><label for="preset">x264 speed preset</label>
+          <select id="preset"><option value="ultrafast" selected>ultrafast (fastest)</option><option value="veryfast">veryfast (smaller file)</option></select></div>
+      </div>
+      <button id="btnRunMine" class="btn secondary" disabled>▶ Run with my video</button>
+      <p class="note">Tip: choosing “Choose Files” instead of “Photo Library” keeps the original file. Only the first 10 s from the start time are exported.</p>
+    </details>
+    <button id="btnCancel" class="btn danger hidden">■ Cancel run</button>
+  </section>
+
+  <section class="card" id="progressCard">
+    <h2>2 · Progress</h2>
+    <div class="plabel"><span id="plabel">Idle — press Run.</span><span id="ppct">0%</span></div>
+    <div class="bar"><i id="pfill"></i></div>
+    <div class="plabel"><span id="pdetail" style="color:var(--mute);font-size:13px"></span><span></span></div>
+    <ol class="steps" id="steps"></ol>
+  </section>
+
+  <section class="card hidden" id="resultCard">
+    <h2>3 · Result</h2>
+    <div id="verdict" class="banner"></div>
+    <table id="metrics"></table>
+    <div id="mediaBox">
+      <video id="vid" controls playsinline preload="metadata"></video>
+      <img id="frameImg" class="frame hidden" alt="Caption check frame">
+      <p class="note" id="mediaNote"></p>
+    </div>
+    <button id="btnShare" class="btn secondary hidden">⤓ Save / Share video</button>
+    <p class="note"><a id="dl" class="hidden" download="clipgen-phase0.mp4" style="color:var(--accent)">Download MP4 (alternative)</a></p>
+  </section>
+
+  <section class="card hidden" id="reportCard">
+    <h2>4 · Report (paste this back to Claude)</h2>
+    <textarea id="report" readonly></textarea>
+    <button id="btnCopy" class="btn">Copy report</button>
+  </section>
+
+  <section class="card">
+    <h2>FFmpeg log</h2>
+    <details><summary>Show live log</summary><pre id="log"></pre></details>
+  </section>
+
+  <noscript><div class="banner bad"><b>JavaScript is off</b>This test needs JavaScript.</div></noscript>
+</main>
+
+<!-- Worker that hosts the single-thread FFmpeg core (own minimal wrapper, same calls the official worker makes). -->
+<script id="worker-src" type="text/plain">
+let core = null;
+const post = (m, t) => self.postMessage(m, t || []);
+const e2s = (e) => {
+  try {
+    if (e && e.message) return (e.name ? e.name + ': ' : '') + e.message;
+    if (typeof e === 'number') return 'WASM abort/exception code ' + e;
+    return String(e);
+  } catch (_) { return 'Unknown error'; }
+};
+self.onmessage = async (ev) => {
+  const { id, op, args } = ev.data;
+  try {
+    let value = null; const transfer = [];
+    switch (op) {
+      case 'load': {
+        importScripts(args.coreURL);
+        if (typeof self.createFFmpegCore !== 'function') throw new Error('createFFmpegCore() not found after loading ffmpeg-core.js');
+        core = await self.createFFmpegCore({
+          mainScriptUrlOrBlob: args.coreURL + '#' + btoa(JSON.stringify({ wasmURL: args.wasmURL, workerURL: args.coreURL })),
+          locateFile: (p) => (/\.wasm$/.test(p) ? args.wasmURL : p)
+        });
+        core.setLogger((d) => post({ type: 'log', msg: (d && d.message !== undefined) ? String(d.message) : String(d) }));
+        core.setProgress((d) => post({ type: 'progress', data: d }));
+        value = true; break;
+      }
+      case 'exec': {
+        core.setTimeout(-1); core.exec(...args.args);
+        value = (typeof core.ret === 'number') ? core.ret : 0;   // if the core does not expose ret, the page checks the output file instead
+        core.reset(); break;
+      }
+      case 'writeFile': { core.FS.writeFile(args.name, args.data); value = true; break; }
+      case 'readFile': { const d = core.FS.readFile(args.name); value = d; transfer.push(d.buffer); break; }
+      case 'deleteFile': { core.FS.unlink(args.name); value = true; break; }
+      case 'mkdir': { core.FS.mkdir(args.path); value = true; break; }
+      case 'mount': { core.FS.mount(core.FS.filesystems.WORKERFS, args.options, args.path); value = true; break; }
+      case 'unmount': { core.FS.unmount(args.path); value = true; break; }
+      case 'memInfo': {
+        let b = null;
+        try { if (core.HEAPU8 && core.HEAPU8.buffer) b = core.HEAPU8.buffer.byteLength; else if (core.wasmMemory) b = core.wasmMemory.buffer.byteLength; } catch (_) {}
+        value = b; break;
+      }
+      default: throw new Error('Unknown op ' + op);
+    }
+    post({ type: 'result', id, value }, transfer);
+  } catch (e) {
+    post({ type: 'result', id, error: e2s(e) });
+  }
+};
+</script>
+
+<script>
+(() => {
+'use strict';
+
+/* ================= configuration ================= */
+const VERSION = 'phase0-v1';
+const CORE_SOURCES = [
+  { id: 'jsDelivr · core 0.12.10', base: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd' },
+  { id: 'unpkg · core 0.12.10',    base: 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd' },
+  { id: 'jsDelivr · core 0.12.6',  base: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd' },
+  { id: 'unpkg · core 0.12.6',     base: 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd' }
+];
+const WRAPPER_BASES = [
+  'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd',
+  'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd'
+];
+const EXPORT_SECONDS = 10, SOURCE_SECONDS = 12;
+const OUT_W = 720, OUT_H = 1280;
+const CAPTION_PROBE_SEC = 1.5;     // a caption is on screen at this time
+const MIN_DIFF_PIXELS = 600;       // pixels that must differ to call captions "visible"
+const LOAD_TIMEOUT_MS = 120000;
+const STALL_WARN_MS = 90000;
+const FLAG_KEY = 'clipgen.phase0.running';
+
+// Embedded Poppins Bold (Latin subset, ~15 KB)
+const FONT_B64 = "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";
+
+// crop to 9:16 around the centre (works for landscape, square and tall sources), then 720x1280
+const VF_BASE = "crop=w='min(iw,trunc(ih*9/16/2)*2)':h='min(ih,trunc(iw*16/9/2)*2)',scale=" + OUT_W + ":" + OUT_H + ":flags=bicubic,setsar=1";
+const VF_ASS  = VF_BASE + ",subtitles=filename=/sub.ass:fontsdir=/fonts,format=yuv420p";
+const VF_DT   = VF_BASE + ",drawtext=fontfile=/fonts/font.ttf:text='CLIPGEN AI CAPTION TEST':fontsize=58:fontcolor=white:borderw=5:bordercolor=black:x=(w-text_w)/2:y=h-420:enable='between(t,0.5,3)',format=yuv420p";
+
+const STEP_DEFS = [
+  ['env',      'Device check',                              2],
+  ['load',     'Load FFmpeg core (single-thread)',         25],
+  ['probe',    'Check encoders & filters',                  3],
+  ['source',   'Prepare source video',                     10],
+  ['plain',    'Export 10 s · 9:16 · 720×1280',            25],
+  ['caps',     'Export with animated captions (libass)',   25],
+  ['verify',   'Verify video & caption pixels',             7],
+  ['fallback', 'Fallback captions (drawtext)',              3]
+];
+const STEP_W = Object.fromEntries(STEP_DEFS.map(s => [s[0], s[2]]));
+const STEP_LABEL = Object.fromEntries(STEP_DEFS.map(s => [s[0], s[1]]));
+const TOTAL_W = STEP_DEFS.reduce((a, s) => a + s[2], 0);
+
+/* ================= small helpers ================= */
+const $ = (s) => document.querySelector(s);
+const msg = (e) => { try { return (e && e.message) ? e.message : String(e); } catch (_) { return 'unknown error'; } };
+const sec = (ms) => (ms / 1000).toFixed(1) + ' s';
+const mb = (b) => (b / 1048576).toFixed(1) + ' MB';
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const withTimeout = (p, ms, what) => new Promise((res, rej) => {
+  const t = setTimeout(() => rej(new Error(what + ' timed out after ' + Math.round(ms / 1000) + ' s')), ms);
+  p.then(v => { clearTimeout(t); res(v); }, e => { clearTimeout(t); rej(e); });
+});
+function b64ToBytes(b64) {
+  const bin = atob(b64); const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8;
+}
+function classify(e) {
+  const t = msg(e);
+  const memory = /memory|oom|out of bounds|RangeError|alloc|enlarge|grow|Aborted|abort\(|unreachable|too large|quota/i.test(t);
+  return { text: t, memory };
+}
+class ExecError extends Error {
+  constructor(label, ret, lines) {
+    const tail = (lines || []).filter(l => l && l.trim()).slice(-8).join('\n');
+    super(label + ' — FFmpeg exited with code ' + ret + (tail ? '\n' + tail : ''));
+    this.ret = ret; this.lines = lines || [];
+  }
+}
+
+/* Parse family/style names from a TrueType 'name' table so the ASS style always matches the font. */
+function parseFontNames(u8) {
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const n = dv.getUint16(4);
+  let off = 0, len = 0;
+  for (let i = 0; i < n; i++) {
+    const p = 12 + i * 16;
+    const tag = String.fromCharCode(u8[p], u8[p + 1], u8[p + 2], u8[p + 3]);
+    if (tag === 'name') { off = dv.getUint32(p + 8); len = dv.getUint32(p + 12); break; }
+  }
+  if (!off) throw new Error('font has no name table');
+  const count = dv.getUint16(off + 2), strOff = dv.getUint16(off + 4);
+  const out = {};
+  for (let i = 0; i < count; i++) {
+    const r = off + 6 + i * 12;
+    const platform = dv.getUint16(r), nameId = dv.getUint16(r + 6), l = dv.getUint16(r + 8), o = dv.getUint16(r + 10);
+    if (nameId !== 1 && nameId !== 2 && nameId !== 16) continue;
+    if (platform !== 3 && platform !== 1) continue;
+    const start = off + strOff + o; let s = '';
+    if (platform === 3) { for (let k = 0; k + 1 < l; k += 2) s += String.fromCharCode(dv.getUint16(start + k)); }
+    else { for (let k = 0; k < l; k++) s += String.fromCharCode(u8[start + k]); }
+    if (!(nameId in out) || platform === 3) out[nameId] = s;
+  }
+  return { family: out[16] || out[1] || 'Poppins', style: out[2] || 'Regular' };
+}
+
+function buildAss(family, bold) {
+  const b = bold ? -1 : 0;
+  return [
+    '[Script Info]', 'ScriptType: v4.00+', 'PlayResX: ' + OUT_W, 'PlayResY: ' + OUT_H, 'WrapStyle: 0', 'ScaledBorderAndShadow: yes', '',
+    '[V4+ Styles]',
+    'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+    'Style: Cap,' + family + ',66,&H0000E5FF,&H00FFFFFF,&H00000000,&H80000000,' + b + ',0,0,0,100,100,0,0,1,5,2,2,50,50,300,1', '',
+    '[Events]',
+    'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+    'Dialogue: 0,0:00:00.50,0:00:03.00,Cap,,0,0,0,,{\\fad(150,150)}{\\k60}CLIPGEN {\\k60}AI {\\k60}CAPTION {\\k60}TEST',
+    'Dialogue: 0,0:00:03.20,0:00:06.00,Cap,,0,0,0,,{\\fad(150,150)}{\\k70}Word {\\k70}by {\\k70}word {\\k70}highlight',
+    'Dialogue: 0,0:00:06.20,0:00:09.80,Cap,,0,0,0,,{\\fad(150,150)}{\\k70}Vertical {\\k70}9:16 {\\k70}720p {\\k70}export {\\k70}works',
+    ''
+  ].join('\n');
+}
+
+/* ================= global state ================= */
+const state = { coreCache: null, engine: null, running: false, logBuf: [], logDirty: false, blobUrls: [], wake: null };
+let run = null;   // current run context
+
+/* ================= log + UI plumbing ================= */
+function addLog(line) {
+  state.logBuf.push(String(line));
+  if (state.logBuf.length > 1600) state.logBuf.splice(0, state.logBuf.length - 1200);
+  state.logDirty = true;
+}
+setInterval(() => {
+  if (!state.logDirty) return;
+  state.logDirty = false;
+  const pre = $('#log'); pre.textContent = state.logBuf.slice(-250).join('\n'); pre.scrollTop = pre.scrollHeight;
+}, 600);
+
+function buildStepsUi() {
+  const ol = $('#steps'); ol.innerHTML = '';
+  for (const [id, label] of STEP_DEFS) {
+    const li = document.createElement('li'); li.id = 'st-' + id; li.className = 'pending';
+    li.innerHTML = '<span class="ico">○</span><span class="lbl"></span><span class="tm"></span><div class="det"></div>';
+    li.querySelector('.lbl').textContent = label; ol.appendChild(li);
+  }
+}
+const ICONS = { pending: '○', run: '◔', ok: '✓', warn: '!', fail: '✕', skip: '–' };
+function uiStep(id, status, note, ms) {
+  const li = $('#st-' + id); if (!li) return;
+  li.className = status; li.querySelector('.ico').textContent = ICONS[status] || '○';
+  if (ms !== undefined) li.querySelector('.tm').textContent = sec(ms);
+  if (note !== undefined) li.querySelector('.det').textContent = note;
+}
+function uiProgress() {
+  if (!run) return;
+  const w = STEP_W[run.cur] || 0;
+  const pct = Math.round(100 * (run.doneW + w * (run.stepFrac || 0)) / TOTAL_W);
+  $('#pfill').style.width = clamp(pct, 0, 100) + '%'; $('#ppct').textContent = clamp(pct, 0, 100) + '%';
+  $('#plabel').textContent = run.label || '';
+  let d = '';
+  if (run.exec) {
+    d = 'elapsed ' + sec(performance.now() - run.exec.t0);
+    if (run.exec.expected > 1) d += ' · video time ' + run.exec.sec.toFixed(1) + ' / ' + run.exec.expected + ' s';
+    if (performance.now() - run.lastActivity > STALL_WARN_MS) d += ' · ⚠ no activity for ' + Math.round((performance.now() - run.lastActivity) / 1000) + ' s (still working or stuck — you can Cancel)';
+  } else if (run.dlText) d = run.dlText;
+  $('#pdetail').textContent = d;
+}
+setInterval(() => { if (run && state.running) uiProgress(); }, 250);
+
+/* ================= engine hooks (called by worker messages) ================= */
+const hooks = {
+  onLog(line) {
+    addLog(line);
+    if (!run) return;
+    run.lastActivity = performance.now();
+    const ex = run.exec; if (!ex) return;
+    if (ex.lines.length < 1500) ex.lines.push(line);
+    const m = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(line);
+    if (m) { ex.sec = Math.max(ex.sec, Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])); run.stepFrac = clamp(ex.sec / ex.expected, 0, 0.99); }
+  },
+  onProgress(d) {
+    if (!run) return; run.lastActivity = performance.now();
+    const ex = run.exec; if (!ex || !d) return;
+    const t = Number(d.time);
+    if (isFinite(t) && t > 0) { ex.sec = Math.max(ex.sec, t > 1000 ? t / 1e6 : t); run.stepFrac = clamp(ex.sec / ex.expected, 0, 0.99); }
+  }
+};
+
+/* ================= engines ================= */
+async function fetchBlob(url, type, onProgress) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + url);
+  const total = Number(res.headers.get('content-length')) || 0;
+  if (!res.body || !res.body.getReader) { const b = await res.blob(); if (onProgress) onProgress(b.size, b.size); return new Blob([b], { type }); }
+  const reader = res.body.getReader(); const chunks = []; let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read(); if (done) break;
+    chunks.push(value); got += value.length; if (onProgress) onProgress(got, total);
+  }
+  return new Blob(chunks, { type });
+}
+
+async function downloadCore() {
+  if (state.coreCache) return Object.assign({ cached: true }, state.coreCache);
+  const errors = [];
+  for (const src of CORE_SOURCES) {
+    try {
+      const t0 = performance.now();
+      run.dlText = 'Downloading FFmpeg core from ' + src.id + ' …'; uiProgress();
+      const js = await fetchBlob(src.base + '/ffmpeg-core.js', 'text/javascript');
+      const wasm = await fetchBlob(src.base + '/ffmpeg-core.wasm', 'application/wasm', (got, total) => {
+        run.stepFrac = total ? clamp(got / total, 0, 0.95) * 0.7 : 0.3;
+        run.dlText = 'Downloading core (' + src.id + '): ' + mb(got) + (total ? ' / ' + mb(total) : '');
+      });
+      const core = { src, coreURL: URL.createObjectURL(js), wasmURL: URL.createObjectURL(wasm), jsBytes: js.size, wasmBytes: wasm.size, downloadMs: performance.now() - t0 };
+      state.coreCache = core; run.dlText = '';
+      return Object.assign({ cached: false }, core);
+    } catch (e) { errors.push(src.id + ': ' + msg(e)); }
+  }
+  throw new Error('Could not download the FFmpeg core from any CDN (' + (navigator.onLine ? 'online' : 'OFFLINE') + ').\n' + errors.join('\n'));
+}
+
+function createCustomEngine(core) {
+  const blob = new Blob([$('#worker-src').textContent], { type: 'text/javascript' });
+  const wurl = URL.createObjectURL(blob);
+  const worker = new Worker(wurl);
+  let nextId = 1; const pending = new Map(); let dead = null;
+  const failAll = (err) => { dead = err; for (const p of pending.values()) p.reject(err); pending.clear(); };
+  worker.onmessage = (ev) => {
+    const m = ev.data || {};
+    if (m.type === 'log') hooks.onLog(m.msg);
+    else if (m.type === 'progress') hooks.onProgress(m.data);
+    else if (m.type === 'result') {
+      const p = pending.get(m.id); if (!p) return; pending.delete(m.id);
+      if (m.error) p.reject(new Error(m.error)); else p.resolve(m.value);
+    }
+  };
+  worker.onerror = (ev) => { if (ev.preventDefault) ev.preventDefault(); failAll(new Error('Worker crashed: ' + (ev.message || 'unknown error'))); };
+  const call = (op, args, transfer) => new Promise((resolve, reject) => {
+    if (dead) return reject(dead);
+    const id = nextId++; pending.set(id, { resolve, reject });
+    try { worker.postMessage({ id, op, args }, transfer || []); } catch (e) { pending.delete(id); reject(e); }
+  });
+  const engine = {
+    name: 'custom-worker',
+    exec: (args) => call('exec', { args }),
+    writeFile: (name, data) => {
+      if (data.byteOffset !== 0 || data.byteLength !== data.buffer.byteLength) data = data.slice();
+      return call('writeFile', { name, data }, [data.buffer]);
+    },
+    readFile: (name) => call('readFile', { name }),
+    deleteFile: (name) => call('deleteFile', { name }),
+    mkdir: (path) => call('mkdir', { path }),
+    mount: (path, options) => call('mount', { path, options }),
+    unmount: (path) => call('unmount', { path }),
+    memInfo: () => call('memInfo', {}),
+    terminate: () => { failAll(new Error('Cancelled')); try { worker.terminate(); } catch (_) {} URL.revokeObjectURL(wurl); }
+  };
+  return call('load', { coreURL: core.coreURL, wasmURL: core.wasmURL }).then(() => engine, (e) => { engine.terminate(); throw e; });
+}
+
+function loadScriptTag(url) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script'); s.src = url; s.onload = () => res(); s.onerror = () => rej(new Error('failed to load ' + url));
+    document.head.appendChild(s);
+  });
+}
+async function createOfficialEngine(core) {
+  let lastErr = null;
+  if (!(window.FFmpegWASM && window.FFmpegWASM.FFmpeg)) {
+    for (const base of WRAPPER_BASES) {
+      try { await loadScriptTag(base + '/ffmpeg.js'); lastErr = null; break; } catch (e) { lastErr = e; }
+    }
+    if (lastErr) throw lastErr;
+  }
+  let chunkURL = null;
+  for (const base of WRAPPER_BASES) {
+    try { chunkURL = URL.createObjectURL(await fetchBlob(base + '/814.ffmpeg.js', 'text/javascript')); break; } catch (e) { lastErr = e; }
+  }
+  if (!chunkURL) throw lastErr || new Error('wrapper worker chunk not found');
+  const ff = new window.FFmpegWASM.FFmpeg();
+  ff.on('log', (d) => hooks.onLog(d && d.message !== undefined ? d.message : String(d)));
+  ff.on('progress', (d) => hooks.onProgress(d));
+  await ff.load({ coreURL: core.coreURL, wasmURL: core.wasmURL, classWorkerURL: chunkURL });
+  return {
+    name: 'official-wrapper',
+    exec: (args) => ff.exec(args),
+    writeFile: (n, d) => ff.writeFile(n, d),
+    readFile: (n) => ff.readFile(n),
+    deleteFile: (n) => ff.deleteFile(n),
+    mkdir: (p) => ff.createDir(p),
+    mount: (p, o) => ff.mount('WORKERFS', o, p),
+    unmount: (p) => ff.unmount(p),
+    memInfo: async () => null,
+    terminate: () => { try { ff.terminate(); } catch (_) {} }
+  };
+}
+
+async function createEngine(core) {
+  if (window.__PHASE0_ENGINE__) return window.__PHASE0_ENGINE__.create(hooks);   // test hook (not used on the phone)
+  const fails = [];
+  try { return await withTimeout(createCustomEngine(core), LOAD_TIMEOUT_MS, 'custom-worker start'); }
+  catch (e) { fails.push('custom-worker: ' + msg(e)); addLog('[phase0] custom worker failed: ' + msg(e)); }
+  try { return await withTimeout(createOfficialEngine(core), LOAD_TIMEOUT_MS, 'official-wrapper start'); }
+  catch (e) { fails.push('official-wrapper: ' + msg(e)); addLog('[phase0] official wrapper failed: ' + msg(e)); }
+  throw new Error('FFmpeg could not be started with either method.\n' + fails.join('\n'));
+}
+
+/* ================= exec wrapper ================= */
+async function runExec(label, args, expectedSec) {
+  const t0 = performance.now();
+  run.label = label; run.stepFrac = 0;
+  run.exec = { t0, expected: Math.max(1, expectedSec || 1), sec: 0, lines: [] };
+  run.lastActivity = t0;
+  addLog('$ ffmpeg ' + args.join(' '));
+  let ret;
+  try { ret = await state.engine.exec(args); }
+  catch (e) { run.exec = null; throw e; }
+  const ex = run.exec; run.exec = null;
+  const ms = performance.now() - t0;
+  if (run.cancelled) throw new Error('Cancelled');
+  return { ret, ms, lines: ex.lines };
+}
+async function memSnap(tag) {
+  const o = { tag };
+  try { const b = await state.engine.memInfo(); if (typeof b === 'number') o.wasmMB = +(b / 1048576).toFixed(0); } catch (_) {}
+  try { if (performance && performance.memory) o.jsHeapMB = +(performance.memory.usedJSHeapSize / 1048576).toFixed(0); } catch (_) {}
+  run.rec.mem.push(o); return o;
+}
+
+/* ================= crash-flag (detects Safari killing the tab) ================= */
+function setFlag(step) { try { localStorage.setItem(FLAG_KEY, JSON.stringify({ step, t: Date.now() })); } catch (_) {} }
+function clearFlag() { try { localStorage.removeItem(FLAG_KEY); } catch (_) {} }
+function readFlag() { try { const v = localStorage.getItem(FLAG_KEY); return v ? JSON.parse(v) : null; } catch (_) { return null; } }
+
+/* ================= environment ================= */
+async function collectEnv() {
+  const ua = navigator.userAgent || '';
+  const ios = /OS (\d+)[_.](\d+)/.exec(ua);
+  const env = {
+    userAgent: ua,
+    iosVersion: ios ? ios[1] + '.' + ios[2] : null,
+    secureContext: !!window.isSecureContext,
+    webassembly: typeof WebAssembly === 'object',
+    worker: typeof Worker === 'function',
+    blobUrl: !!(window.URL && URL.createObjectURL),
+    crossOriginIsolated: !!window.crossOriginIsolated,
+    sharedArrayBuffer: typeof SharedArrayBuffer === 'function',
+    hardwareConcurrency: navigator.hardwareConcurrency || null,
+    deviceMemoryGB: navigator.deviceMemory || null,
+    webCodecs: typeof VideoEncoder === 'function' && typeof VideoDecoder === 'function',
+    webGPU: !!navigator.gpu,
+    wakeLock: 'wakeLock' in navigator,
+    inAppBrowser: /FBAN|FBAV|Instagram|Line\/|GSA\/|Snapchat|MicroMessenger|; wv\)/i.test(ua),
+    standalone: !!(navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches)),
+    screen: screen.width + 'x' + screen.height + ' @' + (window.devicePixelRatio || 1) + 'x',
+    online: navigator.onLine
+  };
+  try { if (navigator.storage && navigator.storage.estimate) { const e = await navigator.storage.estimate(); env.storageQuotaMB = Math.round((e.quota || 0) / 1048576); env.storageUsedMB = Math.round((e.usage || 0) / 1048576); } } catch (_) {}
+  return env;
+}
+
+/* ================= steps ================= */
+async function stepEnv() {
+  const env = run.rec.env = await collectEnv();
+  const bad = [];
+  if (!env.secureContext) bad.push('Page is not served over HTTPS — open the https:// GitHub Pages link, not a saved file.');
+  if (!env.webassembly) bad.push('WebAssembly is not available in this browser.');
+  if (!env.worker) bad.push('Web Workers are not available.');
+  if (!env.blobUrl) bad.push('Blob URLs are not available.');
+  if (bad.length) throw new Error(bad.join(' '));
+  const warns = [];
+  if (env.inAppBrowser) warns.push('This looks like an in-app browser — open the link in Safari for realistic results.');
+  if (env.iosVersion && Number(env.iosVersion.split('.')[0]) < 15) warns.push('iOS ' + env.iosVersion + ' is old; iOS 15+ recommended.');
+  const note = (env.iosVersion ? 'iOS ' + env.iosVersion + ' · ' : '') + (env.hardwareConcurrency || '?') + ' cores · COI ' + (env.crossOriginIsolated ? 'yes' : 'no (expected, single-thread)') + (warns.length ? '\n' + warns.join('\n') : '');
+  return { status: warns.length ? 'warn' : 'ok', note };
+}
+
+async function stepLoad() {
+  const rec = run.rec; let core;
+  if (window.__PHASE0_ENGINE__) core = { src: { id: 'test-hook' }, wasmBytes: 0, jsBytes: 0, downloadMs: 0, cached: true };
+  else core = await downloadCore();
+  rec.load = { downloadMs: core.cached ? 0 : core.downloadMs, cached: !!core.cached, wasmMB: core.wasmBytes ? +(core.wasmBytes / 1048576).toFixed(1) : null, source: core.src.id };
+  run.label = 'Starting FFmpeg (compiling WebAssembly) …'; run.stepFrac = 0.75; run.dlText = 'Compiling & initialising — the first start can take 5–20 s';
+  const t1 = performance.now();
+  state.engine = await createEngine(core);
+  rec.load.initMs = performance.now() - t1; rec.load.engine = state.engine.name; run.dlText = '';
+  await memSnap('after-load');
+  return { note: state.engine.name + ' · ' + core.src.id + '\n' + (core.cached ? 'core already in memory' : 'download ' + sec(rec.load.downloadMs) + ' (' + (rec.load.wasmMB || '?') + ' MB)') + ' · start-up ' + sec(rec.load.initMs) };
+}
+
+async function stepProbe() {
+  const caps = run.rec.caps = { filters: {}, encoders: {}, parsed: false };
+  const v = await runExec('Reading FFmpeg build info …', ['-hide_banner', '-version'], 1);
+  const vt = v.lines.join('\n');
+  caps.version = (/ffmpeg version (\S+)/.exec(vt) || [])[1] || 'unknown';
+  caps.configFlags = { libx264: /--enable-libx264/.test(vt), libass: /--enable-libass/.test(vt), libfreetype: /--enable-libfreetype/.test(vt) };
+  const f = await runExec('Listing filters …', ['-hide_banner', '-filters'], 1);
+  const fs = new Set(); for (const l of f.lines) { const m = /^\s*[A-Z.]{3}\s+(\S+)\s+\S+->\S+/.exec(l); if (m) fs.add(m[1]); }
+  const e = await runExec('Listing encoders …', ['-hide_banner', '-encoders'], 1);
+  const es = new Set(); for (const l of e.lines) { const m = /^\s*[VAS][A-Z.]{5}\s+(\S+)\s/.exec(l); if (m) es.add(m[1]); }
+  caps.parsed = fs.size > 0 && es.size > 0;
+  for (const n of ['crop', 'scale', 'setsar', 'subtitles', 'ass', 'drawtext', 'format']) caps.filters[n] = fs.has(n);
+  for (const n of ['libx264', 'aac']) caps.encoders[n] = es.has(n);
+  if (caps.parsed) {
+    if (!caps.encoders.libx264) throw new Error('This FFmpeg core has no libx264 encoder, so H.264 MP4 export is impossible.');
+    if (!caps.filters.crop || !caps.filters.scale) throw new Error('This FFmpeg core is missing the crop/scale filters.');
+  }
+  await memSnap('after-probe');
+  const yn = (b) => b ? '✓' : '✗';
+  return { note: 'FFmpeg ' + caps.version + (caps.parsed ? ' · libx264 ' + yn(caps.encoders.libx264) + ' · aac ' + yn(caps.encoders.aac) + ' · subtitles/libass ' + yn(caps.filters.subtitles) + ' · drawtext ' + yn(caps.filters.drawtext) : ' · (could not parse capability lists; continuing)') };
+}
+
+async function stepSource() {
+  const eng = state.engine;
+  if (run.opts.mode === 'generated') {
+    const r = await runExec('Generating a 12 s 1280×720 test video …', [
+      '-hide_banner', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100',
+      '-t', String(SOURCE_SECONDS), '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '96k', '-y', 'src.mp4'], SOURCE_SECONDS);
+    if (r.ret !== 0) throw new ExecError('Could not generate the built-in test video (use “Test with my own video” instead)', r.ret, r.lines);
+    run.input = 'src.mp4'; run.start = 0;
+    run.rec.source = { mode: 'generated', ms: r.ms };
+    await memSnap('after-source');
+    return { note: 'generated in ' + sec(r.ms) };
+  }
+  const file = run.opts.file;
+  run.label = 'Opening your video …'; run.stepFrac = 0.3;
+  run.rec.source = { mode: 'file', name: file.name, sizeMB: +(file.size / 1048576).toFixed(1), type: file.type || 'unknown' };
+  let how = 'mounted (no copy)';
+  try {
+    await eng.mkdir('/mnt');
+    await eng.mount('/mnt', { blobs: [{ name: 'input_media', data: file }] });
+    run.input = '/mnt/input_media';
+  } catch (e) {
+    addLog('[phase0] WORKERFS mount failed: ' + msg(e));
+    if (file.size > 600 * 1048576) throw new Error('Mounting failed (' + msg(e) + ') and the file is ' + mb(file.size) + ' — copying it into memory would very likely crash Safari. Try a smaller clip.');
+    run.label = 'Copying video into memory (' + mb(file.size) + ') …';
+    const t0 = performance.now();
+    const buf = new Uint8Array(await file.arrayBuffer());
+    await eng.writeFile('input_media', buf);
+    run.input = 'input_media'; how = 'copied into memory in ' + sec(performance.now() - t0) + ' (mount failed: ' + msg(e) + ')';
+  }
+  run.start = Math.max(0, Number(run.opts.startSec) || 0);
+  run.rec.source.how = how;
+  await memSnap('after-source');
+  return { note: file.name + ' · ' + mb(file.size) + ' · ' + how };
+}
+
+function exportArgs(vf, outName) {
+  return ['-hide_banner', '-ss', String(run.start), '-i', run.input, '-t', String(EXPORT_SECONDS),
+    '-map', '0:v:0', '-map', '0:a:0?', '-dn', '-sn', '-vf', vf, '-r', '30',
+    '-c:v', 'libx264', '-preset', run.opts.preset, '-crf', '26', '-pix_fmt', 'yuv420p', '-profile:v', 'high',
+    '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2', '-movflags', '+faststart', '-y', outName];
+}
+
+async function doExport(label, vf, outName) {
+  const r = await runExec(label, exportArgs(vf, outName), EXPORT_SECONDS);
+  if (r.ret !== 0) throw new ExecError('Export failed', r.ret, r.lines);
+  const bytes = await state.engine.readFile(outName);
+  if (!bytes || bytes.length < 10000) throw new Error('Output file is missing or too small (' + (bytes ? bytes.length : 0) + ' bytes). Source may be shorter than the start time + 10 s.');
+  return { bytes, ms: r.ms, lines: r.lines, rt: (EXPORT_SECONDS * 1000) / r.ms };
+}
+
+async function stepPlain() {
+  const o = await doExport('Exporting 9:16 · 720×1280 (no captions) …', VF_BASE, 'out_plain.mp4');
+  run.plainBytes = o.bytes; run.plainOk = true;
+  run.rec.plain = { ms: o.ms, sizeMB: +(o.bytes.length / 1048576).toFixed(2), realtimeFactor: +o.rt.toFixed(2) };
+  await memSnap('after-plain');
+  return { note: sec(o.ms) + ' for 10 s of video (' + o.rt.toFixed(2) + '× real-time) · ' + mb(o.bytes.length) };
+}
+
+async function ensureFont() {
+  if (run.fontReady) return;
+  const font = b64ToBytes(FONT_B64);
+  const names = parseFontNames(font);
+  run.font = { family: names.family, style: names.style, bytes: font.length };
+  const eng = state.engine;
+  try { await eng.mkdir('/fonts'); } catch (_) { /* may already exist */ }
+  await eng.writeFile('/fonts/font.ttf', font.slice());
+  await eng.writeFile('/sub.ass', new TextEncoder().encode(buildAss(names.family, /bold/i.test(names.style))));
+  run.fontReady = true;
+}
+
+async function stepCaps() {
+  const caps = run.rec.caps;
+  if (caps.parsed && !caps.filters.subtitles && !caps.filters.ass) throw new Error('This FFmpeg core has no libass “subtitles” filter.');
+  await ensureFont();
+  const o = await doExport('Exporting with animated captions (libass) …', VF_ASS, 'out_caps.mp4');
+  const libassHints = o.lines.filter(l => /libass|fontselect|fontconfig|Added subtitle|cannot find|No usable/i.test(l)).slice(0, 8);
+  run.capsBytes = o.bytes; run.capsExported = true;
+  run.rec.captions = { method: 'libass (subtitles filter)', ms: o.ms, sizeMB: +(o.bytes.length / 1048576).toFixed(2), realtimeFactor: +o.rt.toFixed(2), font: run.font.family + ' ' + run.font.style, libassLog: libassHints };
+  await memSnap('after-captions');
+  return { note: sec(o.ms) + ' (' + o.rt.toFixed(2) + '× real-time) · font ' + run.font.family + '\n(pixel check comes next)' };
+}
+
+/* ----- verification helpers ----- */
+async function probeOutput(name) {
+  const r = await runExec('Reading output info …', ['-hide_banner', '-i', name], 1);   // exit code 1 is normal here
+  const t = r.lines.join('\n');
+  const dur = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(t);
+  const dim = /Video:[^\n]*?,\s*(\d{2,5})x(\d{2,5})/.exec(t);
+  const codec = /Video:\s*(\w+)/.exec(t);
+  const hasAudio = /Audio:\s*(\w+)/.exec(t);
+  return {
+    duration: dur ? Number(dur[1]) * 3600 + Number(dur[2]) * 60 + Number(dur[3]) : null,
+    width: dim ? Number(dim[1]) : null, height: dim ? Number(dim[2]) : null,
+    vcodec: codec ? codec[1] : null, acodec: hasAudio ? hasAudio[1] : null
+  };
+}
+async function grabFrame(inName, tag) {
+  const r = await runExec('Extracting a preview frame …', ['-hide_banner', '-ss', String(CAPTION_PROBE_SEC), '-i', inName, '-frames:v', '1', '-y', tag + '_%d.png'], 1);
+  if (r.ret !== 0) throw new ExecError('Frame extraction failed', r.ret, r.lines);
+  return await state.engine.readFile(tag + '_1.png');
+}
+function decodePng(u8) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(new Blob([u8], { type: 'image/png' })); const img = new Image();
+    img.onload = () => {
+      try {
+        const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+        const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0);
+        const d = x.getImageData(0, 0, c.width, c.height); URL.revokeObjectURL(url); res({ w: c.width, h: c.height, data: d.data });
+      } catch (e) { URL.revokeObjectURL(url); rej(e); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('could not decode the preview PNG')); };
+    img.src = url;
+  });
+}
+function diffImages(a, b) {
+  if (a.w !== b.w || a.h !== b.h) throw new Error('preview frames differ in size (' + a.w + 'x' + a.h + ' vs ' + b.w + 'x' + b.h + ')');
+  const A = a.data, B = b.data; let n = 0, x0 = 1e9, y0 = 1e9, x1 = -1, y1 = -1;
+  for (let i = 0, p = 0; i < A.length; i += 4, p++) {
+    const d = Math.max(Math.abs(A[i] - B[i]), Math.abs(A[i + 1] - B[i + 1]), Math.abs(A[i + 2] - B[i + 2]));
+    if (d > 40) { n++; const x = p % a.w, y = (p / a.w) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  return { count: n, bbox: n ? [x0, y0, x1, y1] : null, w: a.w, h: a.h };
+}
+async function checkCaptionPixels(plainName, otherName, tag) {
+  if (!run.framePlain) run.framePlain = await decodePng(await grabFrame(plainName, 'fp'));
+  const png = await grabFrame(otherName, tag);
+  const other = await decodePng(png);
+  const d = diffImages(run.framePlain, other);
+  d.visible = d.count >= MIN_DIFF_PIXELS; d.png = png;
+  return d;
+}
+function waitVideoMeta(v, ms) {
+  return new Promise((res) => {
+    let done = false; const fin = (ok) => { if (done) return; done = true; clearTimeout(t); v.removeEventListener('loadedmetadata', onOk); v.removeEventListener('error', onErr); res(ok); };
+    const onOk = () => fin(true), onErr = () => fin(false); const t = setTimeout(() => fin(false), ms);
+    v.addEventListener('loadedmetadata', onOk); v.addEventListener('error', onErr);
+  });
+}
+
+async function stepVerify() {
+  const notes = []; let status = 'ok';
+  // 1) plain output: dimensions / duration / codecs straight from FFmpeg
+  const info = await probeOutput('out_plain.mp4'); run.rec.outputInfo = info;
+  const okDim = info.width === OUT_W && info.height === OUT_H;
+  const okDur = info.duration !== null && info.duration >= EXPORT_SECONDS - 1 && info.duration <= EXPORT_SECONDS + 0.8;
+  notes.push((info.width || '?') + '×' + (info.height || '?') + ' ' + (info.vcodec || '?') + '/' + (info.acodec || 'no audio') + ' · ' + (info.duration !== null ? info.duration.toFixed(2) : '?') + ' s');
+  if (!okDim) { status = 'fail'; notes.push('✕ expected ' + OUT_W + '×' + OUT_H); }
+  if (!okDur) { status = status === 'fail' ? 'fail' : 'warn'; notes.push('! duration is not ~10 s (is the source shorter than start + 10 s?)'); }
+  run.outputOk = okDim;
+  // 2) caption pixels
+  if (run.capsExported) {
+    try {
+      const d = await checkCaptionPixels('out_plain.mp4', 'out_caps.mp4', 'fc');
+      run.rec.captionCheck = { method: 'libass', differingPixels: d.count, bbox: d.bbox, frame: d.w + 'x' + d.h, visible: d.visible };
+      run.captionOk = d.visible; run.captionMethod = 'libass'; run.captionPng = d.png;
+      notes.push(d.visible ? '✓ captions visible in the exported frame (' + d.count + ' changed pixels)' : '✕ captions NOT visible (only ' + d.count + ' changed pixels) — font/libass problem');
+      if (!d.visible) status = status === 'fail' ? 'fail' : 'warn';
+    } catch (e) {
+      run.captionOk = null; status = status === 'fail' ? 'fail' : 'warn';
+      run.rec.captionCheck = { method: 'libass', error: msg(e) };
+      notes.push('! could not auto-check captions (' + msg(e) + ') — look at the video yourself');
+    }
+  } else { run.captionOk = false; notes.push('captions were not exported'); status = status === 'fail' ? 'fail' : 'warn'; }
+  await memSnap('after-verify');
+  if (status === 'fail') { const err = new Error(notes.join('\n')); err.soft = true; throw err; }
+  return { status, note: notes.join('\n') };
+}
+
+async function stepFallback() {
+  const caps = run.rec.caps;
+  if (caps.parsed && !caps.filters.drawtext) throw new Error('This core has no drawtext filter either — burned-in captions are not possible with this core.');
+  await ensureFont();
+  const o = await doExport('Exporting with drawtext captions (fallback) …', VF_DT, 'out_dt.mp4');
+  const d = await checkCaptionPixels('out_plain.mp4', 'out_dt.mp4', 'fd');
+  run.rec.drawtext = { ms: o.ms, differingPixels: d.count, visible: d.visible, realtimeFactor: +o.rt.toFixed(2) };
+  if (d.visible) { run.captionOk = true; run.captionMethod = 'drawtext (fallback)'; run.dtBytes = o.bytes; run.captionPng = d.png; }
+  await memSnap('after-fallback');
+  if (!d.visible) throw new Error('drawtext export finished but the text is not visible (' + d.count + ' changed pixels).');
+  return { note: 'works: ' + sec(o.ms) + ', ' + d.count + ' changed pixels (text only, no per-word animation)' };
+}
+
+/* ================= orchestration ================= */
+async function runStep(id, fn, soft) {
+  uiStep(id, 'run', ''); run.cur = id; run.stepFrac = 0; run.label = STEP_LABEL[id]; run.dlText = ''; setFlag(id);
+  const t0 = performance.now();
+  try {
+    const out = (await fn()) || {};
+    const ms = performance.now() - t0; const status = out.status || 'ok';
+    run.rec.steps[id] = { status, ms, note: out.note || '' };
+    uiStep(id, status, out.note || '', ms);
+  } catch (e) {
+    const ms = performance.now() - t0; const c = classify(e);
+    if (run.cancelled) { run.rec.steps[id] = { status: 'skip', ms, note: 'cancelled' }; uiStep(id, 'skip', 'cancelled', ms); throw new Error('Cancelled'); }
+    let text = c.text;
+    if (c.memory && !(e && e.soft)) text += '\n⚠ This looks memory-related (WebAssembly ran out of memory or aborted). Try a shorter/smaller video, close other tabs, or restart Safari.';
+    run.rec.steps[id] = { status: 'fail', ms, note: text };
+    run.rec.errors.push({ step: id, message: c.text, memory: c.memory && !(e && e.soft), tail: ((e && e.lines) || state.logBuf).slice(-12) });
+    uiStep(id, 'fail', text, ms);
+    if (!soft) throw e;
+  } finally {
+    run.doneW += STEP_W[id]; run.stepFrac = 0; uiProgress();
+  }
+}
+
+function freshRec(opts) {
+  return {
+    version: VERSION, startedAt: new Date().toISOString(), mode: opts.mode, preset: opts.preset,
+    env: null, load: null, caps: null, source: null, plain: null, captions: null, captionCheck: null, drawtext: null,
+    outputInfo: null, playback: null, mem: [], steps: {}, errors: [], hiddenMs: 0, previousRunInterrupted: null
+  };
+}
+
+async function execute(opts) {
+  if (state.running) return;
+  state.running = true;
+  setUiRunning(true);
+  // clean up the previous run
+  if (state.engine) { try { state.engine.terminate(); } catch (_) {} state.engine = null; }
+  for (const u of state.blobUrls) { try { URL.revokeObjectURL(u); } catch (_) {} } state.blobUrls = [];
+  const prevCrash = window.__prevCrash || null;
+  run = { opts, cur: 'env', doneW: 0, stepFrac: 0, label: 'Starting …', dlText: '', exec: null, cancelled: false, lastActivity: performance.now(), prevCrash };
+  run.rec = freshRec(opts); run.rec.previousRunInterrupted = prevCrash;
+  buildStepsUi(); $('#resultCard').classList.add('hidden'); $('#reportCard').classList.add('hidden');
+  $('#frameImg').classList.add('hidden'); try { $('#vid').removeAttribute('src'); $('#vid').load(); } catch (_) {}
+  const t0 = performance.now();
+  try { if ('wakeLock' in navigator) { state.wake = await navigator.wakeLock.request('screen'); run.rec.wakeLock = 'granted'; } } catch (e) { run.rec.wakeLock = 'denied: ' + msg(e); }
+  let hardFail = false;
+  try {
+    await runStep('env', stepEnv);
+    await runStep('load', stepLoad);
+    await runStep('probe', stepProbe);
+    await runStep('source', stepSource);
+    await runStep('plain', stepPlain);
+    await runStep('caps', stepCaps, true);
+    await runStep('verify', stepVerify, true);
+    if (run.captionOk === false) await runStep('fallback', stepFallback, true);
+    else { run.doneW += 0; uiStep('fallback', 'skip', run.captionOk ? 'not needed' : 'skipped'); }
+  } catch (e) {
+    hardFail = true;
+    if (!run.cancelled) addLog('[phase0] run stopped: ' + msg(e));
+  }
+  // mark leftover steps as skipped
+  for (const [id] of STEP_DEFS) { const li = $('#st-' + id); if (li && (li.className === 'pending')) uiStep(id, 'skip', hardFail ? 'skipped (an earlier step failed)' : ''); }
+  run.rec.totalMs = performance.now() - t0;
+  run.rec.hiddenMs = Math.round(run.hiddenMs || 0);
+  try { if (state.wake) { await state.wake.release(); state.wake = null; } } catch (_) {}
+  clearFlag();
+  run.cur = ''; run.doneW = TOTAL_W; run.stepFrac = 0; run.label = run.cancelled ? 'Cancelled.' : 'Finished.'; uiProgress();
+  await finish();
+  state.running = false; setUiRunning(false);
+}
+
+/* ================= results ================= */
+function pickFinal() {
+  if (run.captionOk && run.captionMethod === 'libass' && run.capsBytes) return { bytes: run.capsBytes, label: 'with libass captions' };
+  if (run.captionOk && run.dtBytes) return { bytes: run.dtBytes, label: 'with drawtext captions' };
+  if (run.capsBytes) return { bytes: run.capsBytes, label: 'captioned export (captions not confirmed — check by eye)' };
+  if (run.plainBytes) return { bytes: run.plainBytes, label: 'without captions' };
+  return null;
+}
+function verdict() {
+  const r = run.rec;
+  if (run.cancelled) return { level: 'warn', title: 'Run cancelled', text: 'You stopped the test before it finished.' };
+  const firstFail = STEP_DEFS.map(s => s[0]).find(id => r.steps[id] && r.steps[id].status === 'fail' && ['env', 'load', 'probe', 'source', 'plain'].includes(id));
+  if (firstFail) return { level: 'bad', title: 'Export pipeline FAILED', text: 'Stopped at “' + STEP_LABEL[firstFail] + '”. See the red message above and copy the report.' };
+  if (run.outputOk === false) return { level: 'bad', title: 'Export ran but the output is wrong', text: 'The MP4 is not 720×1280. Copy the report.' };
+  if (run.captionOk === true && run.captionMethod === 'libass') return { level: 'ok', title: 'PHASE 0 PASSED ✓', text: '9:16 · 720×1280 export works and burned-in animated captions are verified (libass).' };
+  if (run.captionOk === true) return { level: 'warn', title: 'Export works — libass captions failed, drawtext works', text: 'Video export is fine. Animated (per-word) libass captions did not render, but plain drawtext captions did. Copy the report so Claude can pick the caption approach.' };
+  if (run.captionOk === null) return { level: 'warn', title: 'Export works — captions need a manual check', text: 'Play the video below: do you see yellow/white captions near the bottom? Tell Claude.' };
+  return { level: 'warn', title: 'Export works — captions did NOT render', text: 'The video pipeline works, but subtitle rendering failed (see the steps above). Claude will switch to the canvas-caption plan.' };
+}
+function row(k, v, cls) { return '<tr><td>' + k + '</td><td class="' + (cls || '') + '">' + String(v).replace(/</g, '&lt;') + '</td></tr>'; }
+function metricsHtml() {
+  const r = run.rec, h = [];
+  if (r.load) {
+    h.push(row('Engine', r.load.engine + ' · ' + r.load.source));
+    h.push(row('Core download', r.load.cached ? 'cached in memory' : sec(r.load.downloadMs) + (r.load.wasmMB ? ' (' + r.load.wasmMB + ' MB)' : '')));
+    h.push(row('Core start-up (compile)', sec(r.load.initMs || 0)));
+  }
+  if (r.source) h.push(row('Source', r.source.mode === 'file' ? r.source.name + ' · ' + r.source.sizeMB + ' MB · ' + r.source.how : 'generated 1280×720 test video'));
+  if (r.plain) h.push(row('Export (no captions)', sec(r.plain.ms) + ' · ' + r.plain.realtimeFactor + '× real-time · ' + r.plain.sizeMB + ' MB', 'v-ok'));
+  if (r.captions) h.push(row('Export (libass captions)', sec(r.captions.ms) + ' · ' + r.captions.realtimeFactor + '× real-time'));
+  if (r.captionCheck && r.captionCheck.differingPixels !== undefined) h.push(row('Caption pixel check', r.captionCheck.differingPixels + ' pixels changed → ' + (r.captionCheck.visible ? 'VISIBLE' : 'NOT visible'), r.captionCheck.visible ? 'v-ok' : 'v-bad'));
+  if (r.drawtext) h.push(row('drawtext fallback', (r.drawtext.visible ? 'works · ' : 'failed · ') + sec(r.drawtext.ms), r.drawtext.visible ? 'v-ok' : 'v-bad'));
+  if (r.outputInfo) h.push(row('Output file', (r.outputInfo.width || '?') + '×' + (r.outputInfo.height || '?') + ' · ' + (r.outputInfo.vcodec || '?') + ' · ' + (r.outputInfo.duration ? r.outputInfo.duration.toFixed(2) + ' s' : '?'), (r.outputInfo.width === OUT_W && r.outputInfo.height === OUT_H) ? 'v-ok' : 'v-bad'));
+  if (r.playback) h.push(row('Plays in this browser', r.playback, /yes/.test(r.playback) ? 'v-ok' : 'v-warn'));
+  const last = r.mem[r.mem.length - 1];
+  if (last && last.wasmMB) h.push(row('WASM memory (end)', last.wasmMB + ' MB'));
+  else h.push(row('WASM memory', 'not measurable here'));
+  if (last && last.jsHeapMB) h.push(row('JS heap (end)', last.jsHeapMB + ' MB'));
+  h.push(row('Total test time', sec(r.totalMs || 0)));
+  if (r.hiddenMs > 1000) h.push(row('Tab was in background', sec(r.hiddenMs), 'v-warn'));
+  return h.join('');
+}
+function buildReport(v) {
+  const r = run.rec, L = [];
+  const env = r.env || {};
+  L.push('ClipGen AI Phase 0 report · ' + VERSION);
+  L.push('When: ' + r.startedAt + ' · mode: ' + r.mode + ' · preset: ' + r.preset);
+  L.push('VERDICT: ' + v.title + ' — ' + v.text);
+  L.push('');
+  L.push('DEVICE: ' + (env.iosVersion ? 'iOS ' + env.iosVersion : 'non-iOS') + ' · cores ' + env.hardwareConcurrency + ' · deviceMemory ' + (env.deviceMemoryGB || 'n/a') + ' · screen ' + env.screen);
+  L.push('UA: ' + env.userAgent);
+  L.push('ENV: https ' + env.secureContext + ' · crossOriginIsolated ' + env.crossOriginIsolated + ' · SharedArrayBuffer ' + env.sharedArrayBuffer + ' · WebCodecs ' + env.webCodecs + ' · WebGPU ' + env.webGPU + ' · wakeLock ' + (r.wakeLock || env.wakeLock) + ' · standalone ' + env.standalone + ' · inAppBrowser ' + env.inAppBrowser);
+  if (env.storageQuotaMB !== undefined) L.push('STORAGE: quota ~' + env.storageQuotaMB + ' MB, used ~' + env.storageUsedMB + ' MB');
+  if (r.previousRunInterrupted) L.push('PREVIOUS RUN WAS INTERRUPTED at step "' + r.previousRunInterrupted.step + '" (tab likely killed/reloaded, often memory).');
+  L.push('');
+  if (r.load) L.push('LOAD: engine ' + r.load.engine + ' · ' + r.load.source + ' · download ' + sec(r.load.downloadMs) + (r.load.cached ? ' (cached)' : '') + ' · wasm ' + r.load.wasmMB + ' MB · start-up ' + sec(r.load.initMs || 0));
+  if (r.caps) L.push('FFMPEG: ' + r.caps.version + ' · libx264 ' + r.caps.encoders.libx264 + ' · aac ' + r.caps.encoders.aac + ' · subtitles ' + r.caps.filters.subtitles + ' · ass ' + r.caps.filters.ass + ' · drawtext ' + r.caps.filters.drawtext + ' · parsed ' + r.caps.parsed + ' · configure: ' + JSON.stringify(r.caps.configFlags));
+  if (r.source) L.push('SOURCE: ' + JSON.stringify(r.source));
+  if (r.plain) L.push('EXPORT plain: ' + sec(r.plain.ms) + ' · ' + r.plain.realtimeFactor + 'x real-time · ' + r.plain.sizeMB + ' MB');
+  if (r.captions) L.push('EXPORT libass: ' + sec(r.captions.ms) + ' · ' + r.captions.realtimeFactor + 'x · font ' + r.captions.font + ' · libass log: ' + JSON.stringify(r.captions.libassLog));
+  if (r.captionCheck) L.push('CAPTION CHECK: ' + JSON.stringify(r.captionCheck));
+  if (r.drawtext) L.push('DRAWTEXT: ' + JSON.stringify(r.drawtext));
+  if (r.outputInfo) L.push('OUTPUT: ' + JSON.stringify(r.outputInfo) + (r.playback ? ' · plays: ' + r.playback : ''));
+  L.push('MEMORY: ' + (r.mem.length ? r.mem.map(m => m.tag + ' wasm=' + (m.wasmMB || 'n/a') + (m.jsHeapMB ? ' js=' + m.jsHeapMB : '')).join(' | ') : 'n/a'));
+  L.push('');
+  L.push('STEPS:');
+  for (const [id, label] of STEP_DEFS) { const s = r.steps[id]; L.push(' - ' + label + ': ' + (s ? s.status + ' (' + sec(s.ms) + ')' + (s.note ? ' — ' + s.note.replace(/\n/g, ' / ') : '') : 'not run')); }
+  if (r.errors.length) {
+    L.push(''); L.push('ERRORS:');
+    for (const e of r.errors) { L.push(' [' + e.step + '] ' + e.message.split('\n')[0] + (e.memory ? '  (memory-related?)' : '')); }
+    L.push('LAST LOG LINES:'); L.push(state.logBuf.slice(-30).join('\n'));
+  }
+  L.push(''); L.push('TOTAL: ' + sec(r.totalMs || 0) + ' · tab hidden ' + sec(r.hiddenMs || 0));
+  return L.join('\n');
+}
+async function finish() {
+  const v = verdict();
+  const vb = $('#verdict'); vb.className = 'banner ' + v.level; vb.innerHTML = '<b></b><span></span>';
+  vb.querySelector('b').textContent = v.title; vb.querySelector('span').textContent = v.text;
+  const fin = pickFinal();
+  const vid = $('#vid'), note = $('#mediaNote'), img = $('#frameImg');
+  $('#btnShare').classList.add('hidden');
+  if (fin) {
+    const blob = new Blob([fin.bytes], { type: 'video/mp4' }); const url = URL.createObjectURL(blob); state.blobUrls.push(url);
+    run.finalBlob = blob; vid.src = url; try { vid.load(); } catch (_) {}
+    note.textContent = 'Showing the export ' + fin.label + '. Tap ▶ to play.';
+    const ok = await waitVideoMeta(vid, 7000);
+    run.rec.playback = ok ? 'yes (' + vid.videoWidth + '×' + vid.videoHeight + ', ' + (vid.duration || 0).toFixed(1) + ' s)' : 'not confirmed (iOS may wait for you to tap play)';
+    const dl = $('#dl'); dl.href = url; dl.classList.remove('hidden'); $('#btnShare').classList.remove('hidden');
+  } else { note.textContent = 'No video was produced.'; }
+  if (run.captionPng) {
+    const u = URL.createObjectURL(new Blob([run.captionPng], { type: 'image/png' })); state.blobUrls.push(u);
+    img.src = u; img.classList.remove('hidden'); note.textContent += ' The still frame below is taken from the exported video at 1.5 s.';
+  } else img.classList.add('hidden');
+  $('#metrics').innerHTML = metricsHtml();
+  $('#resultCard').classList.remove('hidden');
+  $('#report').value = buildReport(v); $('#reportCard').classList.remove('hidden');
+  $('#resultCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/* ================= UI wiring ================= */
+function setUiRunning(on) {
+  $('#btnRun').disabled = on; $('#btnRunMine').disabled = on || !$('#file').files.length;
+  $('#btnCancel').classList.toggle('hidden', !on);
+}
+function startGenerated() { execute({ mode: 'generated', preset: $('#preset').value, startSec: 0 }); }
+function startMine() {
+  const f = $('#file').files[0]; if (!f) return;
+  execute({ mode: 'file', file: f, preset: $('#preset').value, startSec: $('#startSec').value });
+}
+$('#btnRun').addEventListener('click', startGenerated);
+$('#btnRunMine').addEventListener('click', startMine);
+$('#file').addEventListener('change', () => { $('#btnRunMine').disabled = state.running || !$('#file').files.length; });
+$('#btnCancel').addEventListener('click', () => {
+  if (!run || !state.running) return; run.cancelled = true;
+  if (state.engine) { try { state.engine.terminate(); } catch (_) {} }
+});
+$('#btnShare').addEventListener('click', async () => {
+  if (!run || !run.finalBlob) return;
+  const file = new File([run.finalBlob], 'clipgen-phase0.mp4', { type: 'video/mp4' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: 'ClipGen Phase 0 export' }); return; }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  $('#dl').click();
+});
+$('#btnCopy').addEventListener('click', async () => {
+  const ta = $('#report'); const b = $('#btnCopy');
+  try { await navigator.clipboard.writeText(ta.value); b.textContent = 'Copied ✓'; }
+  catch (_) { ta.removeAttribute('readonly'); ta.focus(); ta.select(); ta.setSelectionRange(0, ta.value.length); let ok = false; try { ok = document.execCommand('copy'); } catch (_) {} ta.setAttribute('readonly', ''); b.textContent = ok ? 'Copied ✓' : 'Press and hold the text → Select All → Copy'; }
+  setTimeout(() => { b.textContent = 'Copy report'; }, 2500);
+});
+document.addEventListener('visibilitychange', () => {
+  if (!run || !state.running) return;
+  if (document.hidden) run.hiddenAt = performance.now();
+  else if (run.hiddenAt) { run.hiddenMs = (run.hiddenMs || 0) + (performance.now() - run.hiddenAt); run.hiddenAt = 0; addLog('[phase0] tab returned from background'); }
+});
+window.addEventListener('error', (e) => addLog('[window.error] ' + (e.message || e)));
+window.addEventListener('unhandledrejection', (e) => addLog('[unhandledrejection] ' + msg(e.reason)));
+
+/* ================= boot ================= */
+buildStepsUi();
+const flag = readFlag();
+if (flag) {
+  window.__prevCrash = flag; clearFlag();
+  const b = $('#crashBanner'); b.classList.remove('hidden');
+  b.innerHTML = '<b>The previous run did not finish</b>It stopped during “' + (STEP_LABEL[flag.step] || flag.step) + '”. Safari probably closed or reloaded the tab — usually a memory limit. Run again and note where it stops (the report will mention this).';
+}
+if (!window.__PHASE0_ENGINE__) { /* nothing to prepare; core is downloaded when the test starts */ }
+window.__phase0 = { version: VERSION, execute, state: () => ({ run, state }) };   // handy for debugging/tests
+})();
+</script>
+</body>
+</html>
