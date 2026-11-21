@@ -1,16 +1,19 @@
-# ClipGen AI — architecture (Phase 2 design)
+# ClipGen AI — architecture (Phase 2 design, v2: creator authorization)
 
 This document says what exists, what is only planned, and the rules every future stage must follow.
 `pipeline.js` is the machine-readable twin of the tables below; the app's status panel is drawn from it.
 
 ## 1. Hard rules (legal and technical)
 
-1. **The pipeline's only input is a file the user provides.** A YouTube link is a *reference* shown in YouTube's
-   official embedded player. It is never a source of video or audio data.
+1. **The pipeline's only input is a file** — either one the user provides, or the creator's own original file
+   fetched from the creator's own host under a signed approval (section 8). A YouTube link is a *reference* shown
+   in YouTube's official embedded player. It is never a source of video or audio data.
 2. ClipGen AI never downloads, records, scrapes or extracts YouTube content. No yt-dlp, no unofficial APIs, no
    "download" sites, no capturing the player. The embed is not modified, overlaid, or ad-blocked.
-3. The user must confirm they own the video or have permission before choosing a file for a YouTube project
-   (stored on the project with a timestamp and the exact wording).
+3. A YouTube project's file is either **verified** (creator registered + verified by the maintainer, video approved
+   in the creator's signed manifest, file equals the signed SHA-256 — no checkbox needed) or **self-declared** (the
+   user confirms they own the video or have permission; stored with timestamp and wording and always labelled
+   "not verified"). A description, a public statement or a checkbox alone never makes a source "verified".
 4. YouTube metadata (title, channel) is display-only, fetched live, and **not saved**. Only the video ID,
    the link kind and the start time (all supplied by the user's own link) are stored.
 5. ₹0: no paid API, no server, no account. Everything runs in the browser; files never leave the device.
@@ -21,7 +24,8 @@ This document says what exists, what is only planned, and the rules every future
 ```
  YouTube link ──► official player (display only)            ┐
                                                              ├─ project (IndexedDB)
- your authorized file (MP4/MOV) ──► SOURCE                   ┘
+ creator-approved file (signed, hash-checked)  ─┐
+ or your own self-declared file (MP4/MOV) ──────┴► SOURCE   ┘
                                       │
                        AUDIO  (FFmpeg.wasm → 8 kHz mono PCM)          built (experimental)
                                       │
@@ -39,7 +43,9 @@ This document says what exists, what is only planned, and the rules every future
 |---|---|---|---|
 | YouTube link + player | built | pasted link | `project.source` |
 | Title / channel | experimental | oEmbed (public) | nothing |
-| Authorized source file | built | file you choose | `blobs[projectId]`, `project.authorization` |
+| Creator registry + signed manifests | experimental | `registry/creators.json` + creator's manifest | `project.authorization`, `authlog` |
+| Fetch creator's original file | experimental | URL inside the signed grant | `blobs[projectId]` |
+| Self-declared source file | built | file you choose | `blobs[projectId]`, `project.authorization` |
 | Direct upload | built | file you choose | `projects`, `blobs` |
 | Audio loudness map | experimental | source file | `analysis[projectId]` |
 | Manual clips | built | player time | `clips[]` |
@@ -55,19 +61,23 @@ Phase 2 uses its own database, `clipgen-ai-p2` (Phase 1 keeps `clipgen-ai`). Two
 would lock each other out the first time either bumped its version, so they stay apart. Phase 1 projects are
 not shown in Phase 2 and are never modified.
 
-Stores in v1: `projects`, `clips` (index `projectId`), `blobs`, `analysis`.
+Stores: `projects`, `clips` (index `projectId`), `blobs`, `analysis`, and (since v2 of the database) `authlog` (index `projectId`).
+Upgrade 1 → 2 runs inside IndexedDB's upgrade transaction: it adds `authlog`, tags every existing checkbox authorization `method:'self-declared'` and sets `schema:3`. Projects, clips, saved videos and analysis are never deleted or rewritten otherwise.
 
 ```
-project  { id, name, schema:2, createdAt, updatedAt,
+project  { id, name, schema:3, createdAt, updatedAt,
            source: {kind:'upload'} | {kind:'youtube', videoId, linkKind, startSec, url, addedAt},
-           authorization: null | {confirmed, at, statement, version},
+           authorization: null
+              | {method:'self-declared', confirmed, at, statement, version}          // user's claim, NOT verified
+              | {method:'creator-grant', creatorId, displayName, keyId, verifiedAt, identity, grant, fileVerified, at},
            video: {name,size,type,lastModified,duration,width,height},   // the user's own file
            hasBlob, thumb, clipCount, analysisStatus, analysisSummary, analysisError }
 clip     { id, projectId, start, end, label, source:'manual'|'loudness'|'auto', createdAt }
 analysis { projectId, version, windowSec, rmsDb, peakDb, stats, moments, probe, engine, ... }
+authlog  { id, projectId, at, event, code, creatorId, keyId, detail }   // check / file-verified / file-rejected / self-declared
 ```
 
-Planned (arrive through a normal **version 2 upgrade of this same database**, `onupgradeneeded` only adds stores):
+Planned (arrive through a normal **version 3 upgrade of this same database**, `onupgradeneeded` only adds stores):
 
 ```
 transcripts { projectId, model, language, segments:[{start,end,text,words:[{t0,t1,w}]}] }
@@ -109,7 +119,7 @@ engine in a `finally`, and never keeps the whole file in memory (WORKERFS mount,
 
 ## 6. Build order (smallest risk first)
 
-1. Device-test Phase 2 (links, player, authorization, file, analysis).
+1. Device-test Phase 2 (links, player, creator authorization with a real creator and file host, file, analysis).
 2. Transcription benchmark page (`phase3-bench/`), separate from the app.
 3. `transcripts` store + transcript viewer with tap-to-seek (no scoring yet).
 4. Scoring v1 (loudness + speech density) + a visible "why this moment" explanation.
@@ -122,3 +132,40 @@ engine in a `finally`, and never keeps the whole file in memory (WORKERFS mount,
   The duration shown is that of your file. The app cannot check that the file matches the link.
 * Title/channel depend on YouTube answering the browser; when it does not, the player and workflow still work.
 * Videos with embedding disabled may show "unavailable" inside the player. The app cannot detect that.
+
+## 8. Creator authorization (v2)
+
+**Why not "approve → download from YouTube"?** YouTube's Terms forbid accessing or downloading videos except as the
+service itself permits, the Data API has no endpoint that returns video media, and the API terms grant no right to
+copy audiovisual content. A creator saying "yes" cannot grant what YouTube has not granted. So the only legitimate
+automatic route is a file the **creator supplies from their own storage**. Details: `CREATOR-AUTHORIZATION.md`.
+
+```
+ paste link ─► parse ID ─► oEmbed (author)  ─┐
+                                              ├─► authz.evaluateYouTubeSource()
+ registry/creators.json (maintainer-verified) ┤       registry loaded? creator listed? status=verified?
+ creator's signed manifest (creator's host) ──┘       author matches? manifest signature valid for registered key?
+                                                      creator id / dates ok? this video listed + clipping allowed?
+                       verified ─► source-fetch.fetchSourceFile(): download from the SIGNED url, hash while streaming,
+                                   keep only if size + SHA-256 equal the signed values ─► same engine as an upload
+                       otherwise ─► explain exactly what is missing; self-declared route (labelled "not verified")
+```
+
+| Module | Role |
+|---|---|
+| `crypto-utils.js` | canonical JSON, streaming SHA-256, ECDSA P-256 sign/verify, key thumbprint (WebCrypto, no library) |
+| `authz.js` | registry validation, manifest verification, the verdict and its checklist (pure; network injected) |
+| `source-fetch.js` | hash-while-downloading fetch of the creator's file, rejects any mismatch |
+| `creator.html` / `creator.js` | Creator Studio: key, registration request, manifest builder + signer, checker |
+| `registry/creators.json` | creator registry. **Ships empty**; only the maintainer adds verified entries |
+
+Re-check: every time a YouTube project opens, the approval is evaluated again. A revoked creator, a bad signature,
+an expired manifest or a video removed from the manifest **blocks** the project (video hidden, analysis disabled).
+If the registry or host simply cannot be reached, the project keeps working and says it could not re-check.
+
+Trust anchor: the ClipGen maintainer's registry (a file in this repository). Anyone can build a manifest; only a
+registry entry set to `verified` by the maintainer makes ClipGen accept it.
+
+Known limits: creator hosts must send CORS headers; channel matching is by handle unless the entry has a channel ID;
+expiry/replay protection is only `expiresAt`; an iPhone cannot hold multi-GB files in memory (auto-fetch ≤ 200 MB,
+refuse > 3 GB); nothing here has been tested with a real creator, host or on iPhone Safari.

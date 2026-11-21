@@ -5,15 +5,24 @@
   (an IndexedDB version bump in one phase would otherwise lock the other phase out).
   Phase 1 projects stay in Phase 1; they are not shown here and are never touched.
 
-  Database "clipgen-ai-p2" v1, four object stores (heavy data is kept apart so lists stay fast):
-    projects  { id, name, createdAt, updatedAt, schema:2,
+  Database "clipgen-ai-p2", version 2, five object stores (heavy data is kept apart so lists stay fast):
+    projects  { id, name, createdAt, updatedAt, schema:3,
                 source:{kind:'upload'} | {kind:'youtube', videoId, linkKind, startSec, url, addedAt},   (a link, never media)
-                authorization:null | {confirmed, at, statement, version},   (youtube projects: required before a file is chosen)
+                authorization:null
+                   | {method:'self-declared', confirmed, at, statement, version}      the user's own claim — NOT verified
+                   | {method:'creator-grant', creatorId, displayName, keyId, verifiedAt, identity,
+                      grant:{videoId, source:{url,sha256,size,type,name}, terms}, fileVerified}  signed by a verified creator
                 video:{name,size,type,lastModified,duration,width,height},   (the user's own file; empty until chosen)
                 hasBlob, thumb(Blob|null), clipCount, analysisStatus, analysisSummary, analysisError }
     clips     { id, projectId, start, end, label, source('manual'|'loudness'), createdAt }      index: projectId
     blobs     { projectId, blob(File/Blob), name, size, type, savedAt }                          the video itself (optional)
     analysis  { projectId, version, windowSec, rmsDb(Float32Array), peakDb(Float32Array), stats, moments, ... }
+    authlog   { id, projectId, at, event, code, creatorId, keyId, detail }       index: projectId   (how a source was authorized)
+
+  Upgrade 1 → 2 (runs once, inside IndexedDB's own upgrade transaction, so it is all-or-nothing):
+    - adds the "authlog" store
+    - tags every existing authorization (the old checkbox) as method:'self-declared' and sets schema:3
+    - never deletes or rewrites projects, clips, saved videos or analysis
 
   If IndexedDB is unavailable or broken (some private modes), everything keeps working in memory for the
   current tab and the app shows a clear "not saving" warning (db.persistent === false).
@@ -22,9 +31,17 @@
 */
 
 const DB_NAME = 'clipgen-ai-p2';
-const DB_VERSION = 1;
-const STORE_NAMES = ['projects', 'clips', 'blobs', 'analysis'];
-const KEY_PATH = { projects: 'id', clips: 'id', blobs: 'projectId', analysis: 'projectId' };
+const DB_VERSION = 2;
+const STORE_NAMES = ['projects', 'clips', 'blobs', 'analysis', 'authlog'];
+const KEY_PATH = { projects: 'id', clips: 'id', blobs: 'projectId', analysis: 'projectId', authlog: 'id' };
+
+/* Brings a project record of any older schema up to the current shape (used by the upgrade AND on every read). */
+export function normalizeProject(p) {
+  if (!p) return p;
+  if (p.authorization && !p.authorization.method) p.authorization = Object.assign({ method: 'self-declared' }, p.authorization);
+  if (p.schema !== undefined && p.schema < 3) p.schema = 3;
+  return p;
+}
 
 const reqP = (req) => new Promise((resolve, reject) => {
   req.onsuccess = () => resolve(req.result);
@@ -42,15 +59,16 @@ class IdbBackend {
 
   open() {
     return new Promise((resolve, reject) => {
-      let settled = false;
+      let settled = false, blocked = false;
       const timer = setTimeout(() => {
-        if (!settled) { settled = true; reject(new Error('IndexedDB did not respond (timed out)')); }
+        if (!settled) { settled = true; reject(new Error(blocked ? 'Another ClipGen tab is open with an older version — close it and reload' : 'IndexedDB did not respond (timed out)')); }
       }, 8000);
       let req;
       try { req = indexedDB.open(DB_NAME, DB_VERSION); }
       catch (e) { clearTimeout(timer); settled = true; reject(e); return; }
 
-      req.onupgradeneeded = () => {
+      req.onblocked = () => { blocked = true; };
+      req.onupgradeneeded = (ev) => {
         const d = req.result;
         if (!d.objectStoreNames.contains('projects')) {
           const s = d.createObjectStore('projects', { keyPath: 'id' });
@@ -62,6 +80,19 @@ class IdbBackend {
         }
         if (!d.objectStoreNames.contains('blobs')) d.createObjectStore('blobs', { keyPath: 'projectId' });
         if (!d.objectStoreNames.contains('analysis')) d.createObjectStore('analysis', { keyPath: 'projectId' });
+        if (!d.objectStoreNames.contains('authlog')) {
+          const s = d.createObjectStore('authlog', { keyPath: 'id' });
+          s.createIndex('projectId', 'projectId');
+        }
+        if (ev.oldVersion >= 1 && ev.oldVersion < 2) {                 // migrate existing projects in place (same transaction)
+          const cur = req.transaction.objectStore('projects').openCursor();
+          cur.onsuccess = () => {
+            const c = cur.result;
+            if (!c) return;
+            c.update(normalizeProject(c.value));
+            c.continue();
+          };
+        }
       };
       req.onsuccess = () => {
         clearTimeout(timer);
@@ -162,13 +193,15 @@ export const db = {
   /* projects */
   async listProjects() {
     const all = await this.backend.getAll('projects');
-    return all.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    return all.map(normalizeProject).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   },
-  getProject(id) { return this.backend.get('projects', id); },
+  async getProject(id) { return normalizeProject(await this.backend.get('projects', id)); },
   async saveProject(p) { p.updatedAt = Date.now(); await this.backend.put('projects', p); return p; },
   async deleteProject(id) {
     const clips = await this.backend.getAllByIndex('clips', 'projectId', id);
     const items = clips.map((c) => ({ store: 'clips', key: c.id }));
+    const logs = await this.backend.getAllByIndex('authlog', 'projectId', id);
+    logs.forEach((l) => items.push({ store: 'authlog', key: l.id }));
     items.push({ store: 'projects', key: id }, { store: 'blobs', key: id }, { store: 'analysis', key: id });
     await this.backend.batchDelete(items);
   },
@@ -193,6 +226,16 @@ export const db = {
   saveAnalysis(projectId, record) { return this.backend.put('analysis', Object.assign({}, record, { projectId })); },
   getAnalysis(projectId) { return this.backend.get('analysis', projectId); },
   deleteAnalysis(projectId) { return this.backend.del('analysis', projectId); },
+
+  /* authorization history: how each source was approved (newest first) */
+  logAuth(projectId, entry) {
+    const rec = Object.assign({ detail: '' }, entry, { id: 'a' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8), projectId, at: Date.now() });
+    return this.backend.put('authlog', rec);
+  },
+  async listAuthLog(projectId) {
+    const all = await this.backend.getAllByIndex('authlog', 'projectId', projectId);
+    return all.sort((a, b) => b.at - a.at);
+  },
 
   /* storage info */
   async storageEstimate() {

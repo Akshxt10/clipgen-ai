@@ -16,7 +16,8 @@
     (file)    (PCM)    (words+times)  (0..1 per   (start,end,  (ASS/drawtext  (ffmpeg.wasm,
                                        window)     label)       overlay)       one clip at a time)
 
-  The rule that keeps this legal and simple: the pipeline's only input is a FILE the user provides.
+  The rule that keeps this legal and simple: the pipeline's only input is a FILE — either one the user provides, or
+  the creator's own original file fetched from the creator's host under a signed approval (authz.js, source-fetch.js).
   A YouTube link is a reference shown in the official player; it is never a source of media data.
 */
 
@@ -37,9 +38,23 @@ export const STAGES = [
     reads: 'oEmbed (public)', writes: 'nothing (display only)'
   },
   {
+    id: 'creator-auth', group: 'Source', status: 'experimental',
+    title: 'Creator registry & signed approvals',
+    detail: 'A creator registers a signing key (the ClipGen maintainer verifies the channel) and publishes a signed list of approved videos with their original files. “Verified” is shown only if every check passes. Tested with synthetic creators only — no real creator is registered yet.',
+    reads: 'registry/creators.json + the creator’s signed manifest', writes: 'project.authorization, authlog[]',
+    risk: 'Needs a real creator whose file host allows cross-origin reads (CORS); untested on iPhone Safari.'
+  },
+  {
+    id: 'source-fetch', group: 'Source', status: 'experimental',
+    title: 'Fetch the creator’s original file',
+    detail: 'Downloads the file from the creator’s own host (never from YouTube) while computing its SHA-256, and keeps it only if it equals the creator-signed hash and size.',
+    reads: 'the URL inside a verified, signed approval', writes: 'blobs[projectId]',
+    risk: 'Large files can exceed iPhone browser memory; files over 200 MB wait for a tap, over 3 GB are refused.'
+  },
+  {
     id: 'source-file', group: 'Source', status: 'built',
-    title: 'Authorized source file',
-    detail: 'You confirm you own the video or have permission, then choose the MP4/MOV yourself. ClipGen AI never downloads from YouTube.',
+    title: 'Self-declared source file',
+    detail: 'For videos without a creator approval: you state you own the video or have permission, then choose the MP4/MOV yourself. It is labelled “not verified”. ClipGen AI never downloads from YouTube.',
     reads: 'a file you choose', writes: 'blobs[projectId], project.authorization'
   },
   {

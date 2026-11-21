@@ -2,14 +2,17 @@
   ClipGen AI · Phase 2 · app (router, views, YouTube links, import, clips, audio analysis UI).
   Hash routes:  #/  (projects)   #/p/<id>  (one project).  The iPhone swipe-back gesture works.
 
-  Phase 2 = Phase 1 (unchanged behaviour for uploads) + YouTube links:
+  Phase 2 = Phase 1 (unchanged behaviour for uploads) + YouTube links + creator authorization:
     - a pasted YouTube link becomes a project that shows YouTube's OFFICIAL embedded player
-    - to make clips, the user confirms they own / may process the video and then supplies the FILE themselves
+    - ClipGen checks whether the video's creator is registered, verified and has approved THIS video (authz.js)
+    - if yes, the creator's own original file is fetched from the creator's host and checked against the creator's
+      signed SHA-256 (source-fetch.js); if not, the user provides a file and says so themselves ("self-declared",
+      shown as NOT verified)
     - that file goes through the same Phase 1 engine (preview, loudness map, manual clips)
     - ClipGen AI never downloads, records or extracts anything from YouTube
 
   Honest status of this phase (also shown in the UI, driven by pipeline.js):
-    BUILT      YouTube link + official player, authorized source file, upload, local projects, manual clips
+    BUILT      YouTube link + official player, creator registry + signed manifests, source file, upload, local projects, manual clips
     EXPERIMENTAL  loudness map, YouTube title/channel (best effort, not saved)
     PLANNED    transcription, automatic highlight detection, auto clips, captions, 9:16 export
 */
@@ -19,8 +22,13 @@ import { Timeline } from './timeline.js';
 import { startAnalysis } from './audio.js';
 import { parseYouTubeUrl, embedSrc, fetchOEmbed, KIND_LABEL } from './youtube.js';
 import { STAGES, STATUS_LABEL, STATUS_PILL } from './pipeline.js';
+import { validateRegistry, fetchJsonLimited, evaluateYouTubeSource, fileMatchesGrant, creatorInviteText, REGISTRY_URL, BLOCKING_CODES } from './authz.js';
+import { sha256OfBlob } from './crypto-utils.js';
+import { fetchSourceFile, MAX_SOURCE_BYTES } from './source-fetch.js';
 
-const APP_VERSION = 'phase2-v1';
+const APP_VERSION = 'phase2-v2';
+const ALLOW_LOCAL_HTTP = ['localhost', '127.0.0.1'].indexOf(location.hostname) >= 0;   // dev/test only; never true on GitHub Pages
+const AUTO_FETCH_MAX = 200 * 1024 * 1024;       // a verified file up to this size downloads by itself; bigger ones wait for a tap
 const VIDEO_EXTS = ['mp4', 'mov', 'm4v'];
 const VIDEO_TYPES = ['video/mp4', 'video/quicktime', 'video/x-m4v'];
 const MIN_CLIP_SEC = 0.5;
@@ -98,6 +106,7 @@ const state = {
   jobs: new Map(),          // projectId -> running analysis { progress, startedAt, logs, cancel }
   ctx: null,                // current project-view context
   thumbUrls: [],
+  registry: null,           // Promise of validateRegistry() result (loaded once per page, reloadable)
   keepCopy: lsGet('clipgen.p2.keepCopy') !== '0'
 };
 
@@ -199,7 +208,7 @@ function homeHtml(projects) {
         '<div class="link-hint" id="linkHint" aria-live="polite"></div>' +
       '</form>' +
       '<p class="card-note">Accepts youtube.com/watch?v=… · youtu.be/… · youtube.com/live/… · youtube.com/shorts/…</p>' +
-      '<div class="rule-box"><b>A link alone cannot make clips.</b> It lets YouTube’s own player show the video here. ClipGen AI never downloads or extracts anything from YouTube. To clip a video, you provide the file — only if you own it or have permission.</div>' +
+      '<div class="rule-box"><b>A link alone cannot make clips.</b> It lets YouTube’s own player show the video here. ClipGen AI never downloads or extracts anything from YouTube. If the creator is registered and has approved the video, ClipGen AI fetches their own original file automatically; otherwise you provide a file you own or are allowed to use.</div>' +
     '</section>' +
     '<div class="or-sep"><span>or</span></div>' +
     '<section class="card" id="uploadCard">' +
@@ -210,6 +219,7 @@ function homeHtml(projects) {
       'Lets the project reopen instantly. Turn off for very large files (over ~1 GB) and re-attach the file when you come back.</span></label>' +
       '<div id="uploadMsg" aria-live="polite"></div>' +
     '</section>' +
+    '<section class="card" style="margin-top:14px" id="creatorCard"><div class="card-head"><h2>Creators</h2><span class="pill">Checking…</span></div><div class="muted small">Loading the creator registry …</div></section>' +
     '<div class="section-head"><h2>Your projects</h2><span class="muted small">' + projects.length + '</span></div>' +
     (projects.length ? '<div class="plist">' + projects.map(projectCard).join('') + '</div>'
       : '<div class="empty">No projects yet.<br>Paste a YouTube link or choose a video above.</div>') +
@@ -218,6 +228,21 @@ function homeHtml(projects) {
       '<p class="card-note">“Planned” means it does not exist yet: nothing in this app transcribes, finds highlights, makes automatic clips, adds captions or exports 9:16 today.</p></section>' +
     '<div class="section-head"><h2>Local storage</h2></div>' +
     '<section class="card" id="storagePanel"><div class="muted small">Checking…</div></section>';
+}
+async function refreshCreatorCard(token) {
+  const reg = await loadRegistry();
+  const box = $('#creatorCard');
+  if (!box || token !== state.token) return;
+  const verified = reg.ok ? reg.creators.filter((c) => c.status === 'verified').length : 0;
+  const pending = reg.ok ? reg.creators.filter((c) => c.status === 'pending').length : 0;
+  box.innerHTML =
+    '<div class="card-head"><h2>Creators</h2>' + (reg.ok ? '<span class="pill ' + (verified ? 'pill-ok' : '') + '">' + verified + ' verified</span>' : '<span class="pill pill-warn">Registry unavailable</span>') + '</div>' +
+    (reg.ok
+      ? '<p class="card-note" style="margin-top:0">' + (verified ? verified + ' creator' + (verified === 1 ? ' has' : 's have') + ' registered and been verified' + (pending ? ' (' + pending + ' waiting for verification)' : '') + '. Videos from these creators that they approved can be clipped without you downloading or uploading anything.'
+          : '<b>No creators are registered yet</b>' + (pending ? ' (' + pending + ' waiting for verification)' : '') + ', so nothing can be verified automatically today. Until then, YouTube links work with a file you provide yourself.') + '</p>'
+      : '<p class="card-note" style="margin-top:0">The creator registry could not be loaded (' + esc(reg.message || 'unknown error') + '), so no video can be verified right now.</p>') +
+    (reg.ok && reg.rejected && reg.rejected.length ? '<div class="msg msg-info">' + reg.rejected.length + ' registry entr' + (reg.rejected.length === 1 ? 'y was' : 'ies were') + ' ignored because ' + (reg.rejected.length === 1 ? 'it is' : 'they are') + ' invalid.</div>' : '') +
+    '<div class="row"><a class="btn btn-sm" href="creator.html">Creator Studio — for creators ›</a></div>';
 }
 async function refreshStoragePanel() {
   const box = $('#storagePanel');
@@ -251,6 +276,7 @@ async function showHome(token) {
   if (token !== state.token) return;
   view.innerHTML = homeHtml(projects);
   wireHome();
+  refreshCreatorCard(token);
   refreshStoragePanel();
   updateStorageChip();
 }
@@ -284,7 +310,7 @@ async function importFile(file) {
     id, name: stripExt(file.name), createdAt: now, updatedAt: now,
     video: { name: file.name, size: file.size, type: file.type || typeForExt(e), lastModified: file.lastModified || null, duration: null, width: null, height: null },
     source: { kind: 'upload' }, authorization: null,
-    hasBlob: false, thumb: null, clipCount: 0, analysisStatus: 'none', analysisSummary: null, analysisError: null, schema: 2
+    hasBlob: false, thumb: null, clipCount: 0, analysisStatus: 'none', analysisSummary: null, analysisError: null, schema: 3
   };
   try {
     busy('Creating project …');
@@ -338,7 +364,7 @@ async function addYouTubeLink(text) {
     id: uid(), name: 'YouTube ' + (KIND_LABEL[r.kind] || 'video').toLowerCase().split(' ')[0] + ' · ' + r.videoId, createdAt: now, updatedAt: now,
     source: { kind: 'youtube', videoId: r.videoId, linkKind: r.kind, startSec: r.startSec, url: r.canonicalUrl, addedAt: now },
     authorization: null, video: blankVideo(),
-    hasBlob: false, thumb: null, clipCount: 0, analysisStatus: 'none', analysisSummary: null, analysisError: null, schema: 2
+    hasBlob: false, thumb: null, clipCount: 0, analysisStatus: 'none', analysisSummary: null, analysisError: null, schema: 3
   };
   try { await db.saveProject(project); }
   catch (err) { setLinkHint('Could not create the project: ' + errText(err), 'bad'); return; }
@@ -358,7 +384,7 @@ function ytCardHtml(ctx) {
     '<div class="yt-frame"><iframe id="ytFrame" src="' + esc(src) + '" title="YouTube video player" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe></div>' +
     '<div class="meta-chips" id="ytMeta"></div>' +
     '<div class="row"><a class="btn btn-sm" id="ytOpen" href="' + esc(watch) + '" target="_blank" rel="noopener noreferrer">Open on YouTube ↗</a></div>' +
-    '<p class="card-note">This is YouTube’s own player. ClipGen AI cannot read, download or cut what plays here. To make clips, provide a video file you are allowed to use (next card).</p></section>';
+    '<p class="card-note">This is YouTube’s own player. ClipGen AI cannot read, download or cut what plays here. To make clips, ClipGen AI needs the creator’s approved original file or a file you are allowed to use (next card).</p></section>';
 }
 function projectHtml(ctx) {
   const p = ctx.project;
@@ -419,12 +445,14 @@ async function showProject(id, token) {
   updateDiag(ctx);
   ctx.timer = setInterval(() => { if (state.jobs.has(ctx.id)) updateJobUi(ctx); }, 500);
   if (isYt(project)) {
+    ctx.authzChecking = true;
     renderSource(ctx);
     $('#sourceCard').addEventListener('change', (e) => onSourceChange(ctx, e));
     $('#sourceCard').addEventListener('click', (e) => onSourceClick(ctx, e));
     loadYtMeta(ctx);
   }
   await attachVideo(ctx);
+  if (isYt(project)) runAuthzCheck(ctx);           // creator-approval check; may block, verify or offer the creator's file
 }
 
 /* ---- meta chips ---- */
@@ -485,6 +513,7 @@ async function attachVideo(ctx) {
     else showNeedFile(ctx);
     return;
   }
+  if (ctx.blocked) { setLocalVisible(ctx, false); renderSource(ctx); renderAnalysis(ctx); return; }
   src = ensureType(src, ctx.project.video.name, ctx.project.video.type);
   ctx.noSrc = false;
   if (ctx.url) { URL.revokeObjectURL(ctx.url); ctx.url = null; }
@@ -766,7 +795,8 @@ function setLocalVisible(ctx, visible) {
 }
 async function loadYtMeta(ctx) {
   renderYtMeta(ctx, null);
-  const res = await fetchOEmbed('https://www.youtube.com/watch?v=' + ctx.project.source.videoId);
+  ctx.ytPromise = fetchOEmbed('https://www.youtube.com/watch?v=' + ctx.project.source.videoId);
+  const res = await ctx.ytPromise;
   if (!ctx.alive) return;
   ctx.yt = res;
   renderYtMeta(ctx, res);
@@ -791,45 +821,216 @@ function renderYtMeta(ctx, res) {
   box.innerHTML = html;
 }
 
+/* ---- creator registry (same-origin file, loaded once per page) ---- */
+function loadRegistry(force) {
+  if (!state.registry || force) {
+    state.registry = (async () => {
+      const r = await fetchJsonLimited(new URL(REGISTRY_URL, location.href).href, { timeoutMs: 10000 });
+      if (!r.ok) return { ok: false, creators: [], rejected: [], updatedAt: null, message: r.message };
+      return validateRegistry(r.json, { allowLocalHttp: ALLOW_LOCAL_HTTP });
+    })();
+  }
+  return state.registry;
+}
+async function logAuth(ctx, entry) {
+  try { await db.logAuth(ctx.id, entry); ctx.authLog = (await db.listAuthLog(ctx.id)).slice(0, 12); if (ctx.alive) updateDiag(ctx); } catch (_) { /* the log is best effort */ }
+}
+
+const selfDeclared = () => ({ method: 'self-declared', confirmed: true, at: Date.now(), statement: AUTH_STATEMENT, version: 1 });
+const isGrantAuth = (a) => !!(a && a.method === 'creator-grant');
+function verifiedAuth(ctx) {
+  const az = ctx.authz;
+  return {
+    method: 'creator-grant', creatorId: az.creator.id, displayName: az.creator.displayName, keyId: az.creator.keyId, verifiedAt: az.creator.verifiedAt,
+    identity: az.identity, grant: az.grant, fileVerified: true, at: Date.now(), version: 2
+  };
+}
+const hostOf = (u) => { try { return new URL(u).hostname; } catch (_) { return '—'; } };
+
+/* Asks the question "may ClipGen process this YouTube video, and where is the creator's file?" (authz.js decides). */
+async function runAuthzCheck(ctx) {
+  if (!isYt(ctx.project) || !ctx.alive) return;
+  const wasBlocked = !!ctx.blocked;
+  ctx.authzChecking = true; ctx.authz = null; ctx.softWarn = null;
+  renderSource(ctx);
+  const [registry, yt] = await Promise.all([loadRegistry(), ctx.ytPromise || Promise.resolve(null)]);
+  if (!ctx.alive) return;
+  const p = ctx.project, a = p.authorization;
+  let res;
+  try {
+    res = await evaluateYouTubeSource({
+      videoId: p.source.videoId, authorUrl: yt && yt.ok ? yt.authorUrl : null, registry,
+      fetchManifest: (e) => fetchJsonLimited(e.manifestUrl, { timeoutMs: 12000 }),
+      allowLocalHttp: ALLOW_LOCAL_HTTP, hintCreatorId: isGrantAuth(a) ? a.creatorId : undefined
+    });
+  } catch (e) {
+    res = { status: 'unverified', code: 'check-failed', message: 'The check failed unexpectedly: ' + errText(e), need: [], creator: null, grant: null, identity: null, checks: [] };
+  }
+  if (!ctx.alive) return;
+  ctx.authz = res; ctx.authzChecking = false;
+  ctx.blocked = (res.code === 'creator-revoked' || (isGrantAuth(a) && BLOCKING_CODES.has(res.code))) ? res : null;
+  if (!ctx.blocked && isGrantAuth(a) && res.status !== 'verified') ctx.softWarn = res;   // e.g. offline: keep working, say it could not be re-checked
+  let last = null;
+  try { last = (await db.listAuthLog(ctx.id)).find((x) => x.event === 'check'); } catch (_) { /* ignore */ }
+  if (!last || last.code !== res.code) await logAuth(ctx, { event: 'check', code: res.code, creatorId: res.creator ? res.creator.id : (isGrantAuth(a) ? a.creatorId : null), keyId: res.creator ? res.creator.keyId || null : null, detail: res.status });
+  if (res.status === 'verified' && isGrantAuth(a)) {           // keep the stored grant current (URL / terms may have been updated by the creator)
+    p.authorization = Object.assign({}, a, { grant: res.grant, verifiedAt: res.creator.verifiedAt, displayName: res.creator.displayName });
+    try { await db.saveProject(p); } catch (_) { /* ignore */ }
+  }
+  if (ctx.blocked) applyBlock(ctx);
+  else if (wasBlocked) await attachVideo(ctx);          // approval is back: bring the video back
+  if (!ctx.alive) return;
+  renderSource(ctx); renderAnalysis(ctx); updateDiag(ctx);
+  const noFile = !ctx.source && !state.files.has(ctx.id) && !(p.hasBlob && !ctx.noSrc);
+  const saveData = !!(navigator.connection && navigator.connection.saveData);
+  if (res.status === 'verified' && noFile && !ctx.autoTried && !saveData && res.grant.source.size <= AUTO_FETCH_MAX) { ctx.autoTried = true; downloadSource(ctx); }
+}
+function applyBlock(ctx) {
+  const j = state.jobs.get(ctx.id);
+  if (j) { try { j.cancel(); } catch (_) { /* ignore */ } }
+  const v = $('#video');
+  if (v) { try { v.pause(); } catch (_) { /* ignore */ } }
+  ctx.playClip = null;
+  setLocalVisible(ctx, false);
+}
+
+/* ---- rendering ---- */
+function checklistHtml(checks) {
+  if (!checks || !checks.length) return '';
+  return '<ul class="checks">' + checks.map((c) => '<li class="' + (c.ok === true ? 'ok' : c.ok === false ? 'bad' : 'unk') + '"><span class="ck" aria-hidden="true">' + (c.ok === true ? '✓' : c.ok === false ? '✗' : '?') + '</span><span>' + esc(c.label) + '</span></li>').join('') + '</ul>';
+}
+function termsHtml(g) {
+  if (!g || !g.terms) return '';
+  const t = g.terms, bits = [];
+  bits.push('Clipping: ' + (t.clipping ? 'allowed' : 'not allowed'));
+  bits.push('Captions: ' + (t.captions ? 'allowed' : 'not allowed'));
+  bits.push('Vertical (9:16) export: ' + (t.verticalExport ? 'allowed' : 'not allowed'));
+  if (t.expiresAt) bits.push('Approval valid until ' + fmtDate(Date.parse(t.expiresAt)));
+  return '<p class="card-note"><b>Creator’s terms:</b> ' + esc(bits.join(' · ')) + '.' +
+    (t.attributionRequired ? ' <b>Attribution required:</b> “' + esc(t.attributionText || 'credit the creator') + '”.' : '') + '</p>';
+}
+const FILE_INPUT = '<input class="sr-only" id="srcFile" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v">';
+const HOWTO =
+  '<details class="howto"><summary>How do I get the file?</summary><div class="howto-body">' +
+  '<p><b>Your own upload:</b> in YouTube Studio open <i>Content</i>, open the video’s menu and choose <i>Download</i> (YouTube offers this for videos you uploaded; it is not offered for every video). On iPhone you can try studio.youtube.com in Safari with “Request Desktop Website”.</p>' +
+  '<p><b>Your own livestream:</b> use the recording saved by your streaming or capture app (for example OBS).</p>' +
+  '<p><b>Someone else’s video:</b> the creator can register in Creator Studio so ClipGen AI can fetch their original file safely. Or ask them to send you the file. Do not use downloader sites or apps — they break YouTube’s rules and ClipGen AI will not help with that.</p>' +
+  '<p class="muted small">Files must be MP4 or MOV. <a class="lnk" href="https://support.google.com/youtube/answer/56100" target="_blank" rel="noopener noreferrer">YouTube Help: download your uploaded videos ↗</a></p></div></details>';
+
 function renderSource(ctx) {
   const el = $('#sourceCard');
   if (!el || !ctx.alive) return;
-  const p = ctx.project, v = p.video, auth = p.authorization;
+  const p = ctx.project, v = p.video, auth = p.authorization, az = ctx.authz;
   const hasFile = !!ctx.source || state.files.has(ctx.id) || (p.hasBlob && !ctx.noSrc);
-  const howTo =
-    '<details class="howto"><summary>How do I get the file?</summary><div class="howto-body">' +
-    '<p><b>Your own upload:</b> in YouTube Studio open <i>Content</i>, open the video’s menu and choose <i>Download</i> (YouTube offers this for videos you uploaded; it is not offered for every video). YouTube’s help page describes it for a computer; on iPhone you can try studio.youtube.com in Safari with “Request Desktop Website”.</p>' +
-    '<p><b>Your own livestream:</b> use the recording saved by your streaming or capture app (for example OBS), or the stream download if Studio offers it.</p>' +
-    '<p><b>Someone else’s video:</b> ask the owner to send you the file. Do not use downloader sites or apps — they break YouTube’s rules and ClipGen AI will not help with that.</p>' +
-    '<p class="muted small">Files must be MP4 or MOV. <a class="lnk" href="https://support.google.com/youtube/answer/56100" target="_blank" rel="noopener noreferrer">YouTube Help: download your uploaded videos ↗</a></p></div></details>';
 
-  if (hasFile) {
+  if (ctx.blocked) {
+    const b = ctx.blocked;
     el.innerHTML =
-      '<div class="card-head"><h2>Source file</h2><span class="pill pill-ok">File chosen</span></div>' +
-      '<div class="file-line"><b>' + esc(v.name || 'Video file') + '</b><span class="muted small num">' + esc(fmtSize(v.size)) + (v.duration ? ' · ' + fmtClock(v.duration, 0) : '') + '</span></div>' +
-      '<p class="card-note" style="margin-top:8px">Processed on this device only. ClipGen AI cannot verify that this file is the same video as the link above — that is your responsibility.</p>' +
-      (auth ? '<p class="card-note">✓ You confirmed on ' + esc(fmtDate(auth.at)) + ': “' + esc(auth.statement || AUTH_STATEMENT) + '”</p>' : '') +
-      '<div class="row"><label class="btn btn-sm" for="srcFile">Replace file</label><button class="btn btn-sm btn-danger" type="button" data-act="removeFile">Remove file</button></div>' +
-      '<input class="sr-only" id="srcFile" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v">';
+      '<div class="card-head"><h2>Source file</h2><span class="pill pill-bad">Blocked</span></div>' +
+      '<div class="msg msg-bad"><b>' + (b.code === 'creator-revoked' ? 'Approval withdrawn' : 'Approval no longer valid') + '.</b> ' + esc(b.message) + '</div>' +
+      '<p class="card-note">The video file is not being used. Your clips stay saved. It becomes usable again only if the creator approves this video again.</p>' +
+      (b.checks && b.checks.length ? '<details class="howto"><summary>What was checked</summary><div class="howto-body">' + checklistHtml(b.checks) + '</div></details>' : '') +
+      (hasFile ? '<div class="row"><button class="btn btn-sm btn-danger" type="button" data-act="removeFile">Remove file from this device</button><button class="btn btn-sm" type="button" data-act="recheck">Check again</button></div>' : '<div class="row"><button class="btn btn-sm" type="button" data-act="recheck">Check again</button></div>');
     return;
   }
-  const authed = !!(auth && auth.confirmed);
+
+  if (hasFile) {
+    const verified = isGrantAuth(auth) && auth.fileVerified;
+    let head, body = '';
+    if (verified) {
+      head = '<span class="pill pill-ok">Verified source</span>';
+      body += '<p class="card-note" style="margin-top:8px">✓ Approved by <b>' + esc(auth.displayName) + '</b>. This file’s size and SHA-256 equal the values the creator signed (' + esc((auth.grant.source.sha256 || '').slice(0, 12)) + '…).</p>';
+      body += termsHtml(auth.grant);
+      if (auth.identity === 'unconfirmed') body += '<div class="msg msg-info">YouTube could not confirm who made this video when it was checked, so the match is by video ID and the creator’s signature only.</div>';
+      if (ctx.authzChecking) body += '<p class="card-note">Re-checking the creator’s approval …</p>';
+      else if (az && az.status === 'verified') body += '<p class="card-note">✓ Approval re-checked just now: still valid.</p>';
+      else if (ctx.softWarn) body += '<div class="msg msg-info">Could not re-check the creator’s approval right now (' + esc(ctx.softWarn.message) + ') Last verified ' + esc(fmtDate(auth.at)) + '. It will be checked again next time you open this project online.</div>';
+    } else {
+      head = '<span class="pill pill-warn">Self-declared · not verified</span>';
+      body += '<p class="card-note" style="margin-top:8px">Processed on this device only. ClipGen AI cannot verify that this file is the video above or that you may use it — that is your responsibility.' +
+        (auth && auth.at ? ' You confirmed on ' + esc(fmtDate(auth.at)) + ': “' + esc(auth.statement || AUTH_STATEMENT) + '”' : '') + '</p>';
+      if (az && az.status === 'verified') body += '<div class="msg msg-info">The creator has approved this video. You can switch to their verified file.</div><div class="row"><button class="btn btn-sm btn-primary" type="button" data-act="fetch">Use the creator’s verified file</button></div>';
+    }
+    el.innerHTML =
+      '<div class="card-head"><h2>Source file</h2>' + head + '</div>' +
+      '<div class="file-line"><b>' + esc(v.name || 'Video file') + '</b><span class="muted small num">' + esc(fmtSize(v.size)) + (v.duration ? ' · ' + fmtClock(v.duration, 0) : '') + '</span></div>' + body +
+      '<div class="row"><label class="btn btn-sm" for="srcFile">Replace file</label><button class="btn btn-sm btn-danger" type="button" data-act="removeFile">Remove file</button></div>' + FILE_INPUT;
+    return;
+  }
+
+  if (ctx.dl) {
+    const g = az && az.grant ? az.grant : null;
+    el.innerHTML =
+      '<div class="card-head"><h2>Source file</h2><span class="pill pill-accent">Fetching</span></div>' +
+      '<p class="card-note" style="margin-top:0">Downloading the creator’s original file from <b>' + esc(hostOf(g && g.source.url)) + '</b> and checking it against the creator’s signed SHA-256 …</p>' +
+      '<div class="progress"><i id="dlBar"></i></div><div class="readout"><span id="dlText" class="num"></span></div>' +
+      '<div class="row"><button class="btn btn-sm btn-danger" type="button" data-act="cancelFetch">Cancel</button></div><p class="card-note">Keep this page open and the screen on.</p>';
+    updateDlUi(ctx);
+    return;
+  }
+
+  if (ctx.authzChecking || !az) {
+    el.innerHTML =
+      '<div class="card-head"><h2>Source file</h2><span class="pill pill-accent">Checking…</span></div>' +
+      '<p class="card-note" style="margin-top:0">Checking whether this video’s creator has registered with ClipGen AI and approved clipping …</p><div class="progress indeterminate"><i></i></div>';
+    return;
+  }
+
+  if (az.status === 'verified') {
+    const g = az.grant, s = g.source;
+    el.innerHTML =
+      '<div class="card-head"><h2>Source file</h2><span class="pill pill-ok">Creator approved</span></div>' +
+      '<p class="card-note" style="margin-top:0"><b>' + esc(az.creator.displayName) + '</b> is a verified ClipGen AI creator and has approved this video for clipping. No confirmation is needed from you.</p>' +
+      '<div class="file-line"><b>' + esc(s.name) + '</b><span class="muted small num">' + esc(fmtSize(s.size)) + ' · from ' + esc(hostOf(s.url)) + '</span></div>' +
+      (ctx.dlError ? '<div class="msg msg-bad">' + esc(ctx.dlError) + '</div>' : '') +
+      '<div class="row"><button class="btn btn-primary" type="button" data-act="fetch">' + (ctx.dlError ? 'Try again — ' : 'Get the creator’s file · ') + esc(fmtSize(s.size)) + '</button></div>' +
+      '<p class="card-note">The file comes straight from the creator’s own host, never from YouTube, and is rejected unless it matches the SHA-256 the creator signed.' +
+      (s.size > AUTO_FETCH_MAX ? ' It is large, so it waits for your tap.' : '') + '</p>' +
+      termsHtml(g) +
+      (az.identity === 'unconfirmed' ? '<div class="msg msg-info">YouTube could not confirm who made this video, so the match is by video ID and the creator’s signature only.</div>' : '') +
+      '<details class="howto"><summary>What was checked</summary><div class="howto-body">' + checklistHtml(az.checks) + '</div></details>' +
+      '<details class="howto"><summary>I already have this exact file</summary><div class="howto-body"><p>Choose it and ClipGen AI will check it against the creator’s signed SHA-256. A different file is not verified.</p>' +
+      '<label class="btn btn-sm" for="srcFile">Choose file</label>' + FILE_INPUT + '</div></details>';
+    return;
+  }
+
+  /* not verified: say exactly why and what is needed */
+  const authed = !!(auth && auth.method === 'self-declared' && auth.confirmed);
+  const canRetry = ['registry-unavailable', 'manifest-unavailable', 'creator-unknown', 'check-failed'].indexOf(az.code) >= 0;
   el.innerHTML =
-    '<div class="card-head"><h2>Source file</h2><span class="pill pill-warn">Needed to make clips</span></div>' +
-    '<p class="card-note" style="margin-top:0">A YouTube link cannot be turned into clips by itself. ClipGen AI works on a <b>video file you provide</b>, using the same engine as Phase 1 (preview, loudness map, manual clips).</p>' +
-    '<div class="rule-box"><b>Only use videos you own or are allowed to process.</b> ClipGen AI does not download from YouTube and has no way to fetch the video for you.</div>' +
-    '<label class="opt"><input type="checkbox" id="authChk"' + (authed ? ' checked' : '') + '><span><b>' + esc(AUTH_STATEMENT) + '</b><br>I will only choose a file I am allowed to use.</span></label>' +
-    (authed
-      ? '<label class="btn btn-primary btn-block" for="srcFile" style="margin-top:12px">Choose video file (MP4 or MOV)</label><input class="sr-only" id="srcFile" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v">'
-      : '<button class="btn btn-block" type="button" disabled aria-disabled="true" style="margin-top:12px">Choose video file (confirm above first)</button>') +
-    (authed && auth.at ? '<p class="card-note">Confirmed on ' + esc(fmtDate(auth.at)) + '.</p>' : '') +
-    howTo;
+    '<div class="card-head"><h2>Source file</h2><span class="pill pill-warn">' + (az.status === 'pending' ? 'Creator pending' : 'Not verified') + '</span></div>' +
+    '<div class="msg msg-info" style="margin-top:0"><b>' + esc(az.message) + '</b></div>' +
+    '<p class="card-note"><b>What is needed to process this video automatically:</b></p>' +
+    '<ul class="need">' + (az.need && az.need.length ? az.need.map((n) => '<li>' + esc(n) + '</li>').join('') : '<li>A creator-approved source file.</li>') + '</ul>' +
+    '<div class="row">' + (canRetry ? '<button class="btn btn-sm" type="button" data-act="recheck">Check again</button>' : '') +
+    (az.code !== 'registry-unavailable' ? '<button class="btn btn-sm" type="button" data-act="invite">Message for the creator</button>' : '') + '</div>' +
+    (ctx.inviteText ? '<textarea class="text-input invite" id="inviteBox" readonly rows="6" aria-label="Message for the creator">' + esc(ctx.inviteText) + '</textarea>' : '') +
+    (az.checks && az.checks.length ? '<details class="howto"><summary>What was checked</summary><div class="howto-body">' + checklistHtml(az.checks) + '</div></details>' : '') +
+    '<details class="howto"' + (authed || ctx.showSelf ? ' open' : '') + '><summary>I own this video, or the creator gave me the file</summary><div class="howto-body">' +
+      '<div class="rule-box"><b>Self-declared, not verified.</b> ClipGen AI cannot check this. Only use a video you own or are allowed to process. It does not download from YouTube and cannot fetch the video for you.</div>' +
+      '<label class="opt"><input type="checkbox" id="authChk"' + (authed ? ' checked' : '') + '><span><b>' + esc(AUTH_STATEMENT) + '</b><br>I will only choose a file I am allowed to use.</span></label>' +
+      (authed
+        ? '<label class="btn btn-primary btn-block" for="srcFile" style="margin-top:12px">Choose video file (MP4 or MOV)</label>' + FILE_INPUT
+        : '<button class="btn btn-block" type="button" disabled aria-disabled="true" style="margin-top:12px">Choose video file (confirm above first)</button>') +
+      HOWTO + '</div></details>';
 }
+function updateDlUi(ctx) {
+  const d = ctx.dl;
+  if (!d) return;
+  const bar = $('#dlBar'), txt = $('#dlText');
+  const pct = d.total ? Math.min(100, (d.received / d.total) * 100) : 0;
+  if (bar) bar.style.width = pct.toFixed(1) + '%';
+  if (txt) txt.textContent = fmtSize(d.received) + ' of ' + fmtSize(d.total) + ' · ' + pct.toFixed(0) + '%';
+}
+
+/* ---- events ---- */
 async function onSourceChange(ctx, e) {
   const t = e.target;
   if (t.id === 'authChk') {
-    ctx.project.authorization = t.checked ? { confirmed: true, at: Date.now(), statement: AUTH_STATEMENT, version: 1 } : null;
+    ctx.project.authorization = t.checked ? selfDeclared() : null;
+    ctx.showSelf = true;
     try { await db.saveProject(ctx.project); } catch (err) { toast('Could not save: ' + errText(err), 'bad'); }
+    if (t.checked) logAuth(ctx, { event: 'self-declared', code: 'checkbox', detail: 'User confirmed ownership/permission (not verified).' });
     renderSource(ctx);
   } else if (t.id === 'srcFile') {
     const f = t.files && t.files[0];
@@ -839,14 +1040,83 @@ async function onSourceChange(ctx, e) {
 }
 function onSourceClick(ctx, e) {
   const btn = e.target.closest ? e.target.closest('[data-act]') : null;
-  if (btn && btn.getAttribute('data-act') === 'removeFile') removeSourceFile(ctx);
+  if (!btn) return;
+  const act = btn.getAttribute('data-act');
+  if (act === 'removeFile') removeSourceFile(ctx);
+  else if (act === 'fetch') downloadSource(ctx);
+  else if (act === 'cancelFetch') { if (ctx.dl && ctx.dl.abort) ctx.dl.abort.abort(); }
+  else if (act === 'recheck') { loadRegistry(true); ctx.inviteText = null; runAuthzCheck(ctx); }
+  else if (act === 'invite') inviteCreator(ctx);
 }
+async function inviteCreator(ctx) {
+  const s = ctx.project.source;
+  const text = creatorInviteText(new URL('creator.html', location.href).href, ctx.yt && ctx.yt.ok ? ctx.yt.authorName : '', 'https://www.youtube.com/watch?v=' + s.videoId);
+  try { await navigator.clipboard.writeText(text); toast('Message copied — paste it to the creator.', 'ok'); }
+  catch (_) { toast('Select the message below and copy it.'); }
+  ctx.inviteText = text;
+  renderSource(ctx);
+}
+
+/* Fetches the creator's file (from the SIGNED url only) and adopts it if the hash matches. */
+async function downloadSource(ctx) {
+  const az = ctx.authz;
+  if (!az || az.status !== 'verified' || ctx.dl || ctx.blocked) return;
+  const g = az.grant, ac = new AbortController();
+  ctx.dlError = null;
+  ctx.dl = { received: 0, total: g.source.size, abort: ac };
+  renderSource(ctx);
+  const wake = await keepAwake();
+  try {
+    const file = await fetchSourceFile(g.source, { signal: ac.signal, allowLocalHttp: ALLOW_LOCAL_HTTP, onProgress: (pr) => { ctx.dl.received = pr.received; updateDlUi(ctx); } });
+    ctx.dl = null;
+    if (!ctx.alive) return;
+    await adoptFile(ctx, file, verifiedAuth(ctx));
+  } catch (e) {
+    ctx.dl = null;
+    if (e && e.name === 'AbortError') toast('Download cancelled.');
+    else {
+      ctx.dlError = errText(e);
+      logAuth(ctx, { event: 'file-rejected', code: (e && e.code) || 'error', creatorId: az.creator.id, keyId: az.creator.keyId || null, detail: errText(e) });
+    }
+    if (ctx.alive) renderSource(ctx);
+  } finally { if (wake) { try { await wake.release(); } catch (_) { /* ignore */ } } }
+}
+
+/* The user chose a file: verified if it equals the creator's signed grant, otherwise only ever self-declared. */
 async function chooseSourceFile(ctx, f) {
   const p = ctx.project;
-  if (!p.authorization || !p.authorization.confirmed) { toast('Confirm that you own the video or have permission first.', 'bad'); return; }
+  if (ctx.blocked) { toast('This video is blocked until the creator approves it again.', 'bad'); return; }
   const problem = validateVideoFile(f);
   if (problem) { toast(problem, 'bad'); return; }
-  const prev = p.video;
+  const az = ctx.authz, auth = p.authorization;
+  const grant = az && az.status === 'verified' ? az.grant : (isGrantAuth(auth) ? auth.grant : null);
+  if (grant) {
+    if (f.size === grant.source.size) {
+      busy('Checking the file against the creator’s signed SHA-256 … 0%');
+      let hex = null;
+      try {
+        hex = await sha256OfBlob(f, { onProgress: (x) => { const t = $('#busyText'); if (t) t.textContent = 'Checking the file against the creator’s signed SHA-256 … ' + Math.round(x * 100) + '%'; } });
+      } catch (err) { busy(null); toast('Could not read the file: ' + errText(err), 'bad'); return; }
+      busy(null);
+      if (fileMatchesGrant(f, hex, grant)) {
+        const a = az && az.status === 'verified' ? verifiedAuth(ctx) : Object.assign({}, auth, { fileVerified: true, at: Date.now() });
+        await adoptFile(ctx, f, a);
+        return;
+      }
+    }
+    toast('This is not the file the creator approved (its size or SHA-256 differs), so it is NOT verified.', 'bad');
+    logAuth(ctx, { event: 'file-rejected', code: 'hash-mismatch', creatorId: isGrantAuth(auth) ? auth.creatorId : (az && az.creator ? az.creator.id : null), detail: f.name + ' · ' + f.size + ' bytes' });
+  }
+  let useAuth = auth && auth.method === 'self-declared' && auth.confirmed ? auth : null;
+  if (!useAuth) {
+    if (!confirm('This file is not verified against a creator approval. Use it only if you own this video or have the owner’s permission to process it.\n\nContinue and mark it as self-declared?')) { ctx.showSelf = true; renderSource(ctx); return; }
+    useAuth = selfDeclared();
+    logAuth(ctx, { event: 'self-declared', code: 'confirm-dialog', detail: 'User confirmed ownership/permission for a file that is not verified.' });
+  }
+  await adoptFile(ctx, f, useAuth);
+}
+async function adoptFile(ctx, f, auth) {
+  const p = ctx.project, prev = p.video;
   const same = prev.name === f.name && prev.size === f.size;
   if (prev.name && !same && !confirm('This file (' + f.name + ', ' + fmtSize(f.size) + ') differs from the previous one (' + prev.name + ', ' + fmtSize(prev.size) + '). Your clips and loudness map belong to the previous file. Use the new file anyway?')) return;
   const j = state.jobs.get(ctx.id);
@@ -856,19 +1126,24 @@ async function chooseSourceFile(ctx, f) {
   p.video = { name: f.name, size: f.size, type: f.type || typeForExt(e), lastModified: f.lastModified || null, duration: same ? prev.duration : null, width: same ? prev.width : null, height: same ? prev.height : null };
   if (!same) p.thumb = null;
   p.hasBlob = false;
+  p.authorization = auth;
+  p.schema = 3;
   busy('Preparing your file …');
   try { await db.deleteBlob(ctx.id); } catch (_) { /* ignore */ }
   if (state.keepCopy && db.info().persistent) {
     busy('Saving a copy in this browser (' + fmtSize(f.size) + ') …');
     try { await db.saveBlob(ctx.id, f); p.hasBlob = true; }
-    catch (err) { toast('Could not keep a copy (' + errText(err) + '). Choose the file again next time.', 'bad'); }
+    catch (err) { toast('Could not keep a copy (' + errText(err) + '). Fetch or choose the file again next time.', 'bad'); }
   }
   try { await db.saveProject(p); } catch (err) { toast('Could not save the project: ' + errText(err), 'bad'); }
+  logAuth(ctx, { event: auth.method === 'creator-grant' ? 'file-verified' : 'file-self-declared', code: auth.method, creatorId: auth.creatorId || null, keyId: auth.keyId || null, detail: f.name + ' · ' + f.size + ' bytes' + (auth.method === 'creator-grant' ? ' · SHA-256 matched the creator’s signature' : ' · not verified') });
   busy(null);
+  if (!ctx.alive) return;
   await attachVideo(ctx);
+  if (ctx.alive) { if (auth.method === 'creator-grant') toast('Verified: the file matches the creator’s signed approval.', 'ok'); renderSource(ctx); }
 }
 async function removeSourceFile(ctx) {
-  if (!confirm('Remove the video file from this project? The YouTube link and your clips stay. You can choose a file again later.')) return;
+  if (!confirm('Remove the video file from this project? The YouTube link and your clips stay. You can choose or fetch a file again later.')) return;
   const p = ctx.project;
   const j = state.jobs.get(ctx.id);
   if (j) { try { j.cancel(); } catch (_) { /* ignore */ } }
@@ -877,8 +1152,9 @@ async function removeSourceFile(ctx) {
   const vEl = $('#video');
   if (vEl) { try { vEl.pause(); vEl.removeAttribute('src'); vEl.load(); } catch (_) { /* ignore */ } }
   if (ctx.url) { URL.revokeObjectURL(ctx.url); ctx.url = null; }
-  ctx.source = null; ctx.playClip = null;
+  ctx.source = null; ctx.playClip = null; ctx.noSrc = true;
   p.hasBlob = false; p.video = blankVideo(); p.thumb = null;
+  if (isGrantAuth(p.authorization)) p.authorization = null;       // a verified file is gone; the approval is re-checked from the link next time
   try { await db.saveProject(p); } catch (err) { toast('Could not save: ' + errText(err), 'bad'); }
   setLocalVisible(ctx, false);
   renderSource(ctx); renderClips(ctx); renderAnalysis(ctx); renderYtMeta(ctx, ctx.yt || null);
@@ -910,9 +1186,9 @@ function renderAnalysis(ctx) {
       '<div class="row"><button class="btn btn-sm btn-danger" type="button" data-act="cancelAna">Cancel</button></div>' +
       '<p class="card-note">Keep this page open and the screen on. The first run downloads the ~32 MB video engine once.</p>';
   } else {
-    const can = !!ctx.source;
+    const can = !!ctx.source && !ctx.blocked;
     html += '<div class="row"><button class="btn btn-primary" type="button" data-act="analyze"' + (can ? '' : ' disabled aria-disabled="true"') + '>' + (a ? 'Analyze again' : 'Analyze audio') + '</button></div>';
-    if (!can) html += '<p class="card-note">' + (isYt(p) ? 'Choose your authorized source file first (see Source file above). The YouTube player cannot be analyzed.' : 'Attach the video file first (see the preview above).') + '</p>';
+    if (!can) html += '<p class="card-note">' + (isYt(p) ? 'Get or choose the source file first (see Source file above). The YouTube player cannot be analyzed.' : 'Attach the video file first (see the preview above).') + '</p>';
     else if (!a) html += '<p class="card-note">First run downloads the ~32 MB video engine (kept by your browser afterwards). Long videos take a few minutes.</p>';
     if (p.analysisStatus === 'failed' && p.analysisError) html += '<div class="msg msg-bad">' + esc(p.analysisError) + '</div>';
     if (p.analysisStatus === 'no-audio') html += '<div class="msg msg-info">This video has no audio track, so there is nothing to measure.</div>';
@@ -970,6 +1246,7 @@ function onAnalysisClick(ctx, e) {
 async function runAnalysis(ctx) {
   const id = ctx.id;
   if (state.jobs.has(id)) return;
+  if (ctx.blocked) { toast('This video is blocked until the creator approves it again.', 'bad'); return; }
   if (!ctx.source) { toast('Attach the video file first.', 'bad'); return; }
   const rec = { progress: { phase: 'engine', fraction: null, text: 'Starting …' }, startedAt: performance.now(), logs: [], cancel: () => {} };
   state.jobs.set(id, rec);
@@ -1036,7 +1313,11 @@ function updateDiag(ctx) {
   lines.push('ClipGen AI ' + APP_VERSION + ' · ' + new Date().toISOString());
   lines.push('Device: ' + (ios ? 'iOS ' + ios[1] + '.' + ios[2] : 'non-iOS') + ' · ' + ua);
   lines.push('Storage: ' + (db.info().persistent ? 'IndexedDB OK' : 'MEMORY ONLY (' + db.info().reason + ')'));
-  lines.push('Source: ' + JSON.stringify({ kind: p.source ? p.source.kind : 'upload', videoId: isYt(p) ? p.source.videoId : undefined, authorized: !!p.authorization }));
+  lines.push('Source: ' + JSON.stringify({ kind: p.source ? p.source.kind : 'upload', videoId: isYt(p) ? p.source.videoId : undefined, selfDeclared: !!(p.authorization && p.authorization.method === 'self-declared') }));
+  if (ctx.authz) lines.push('Creator check: ' + JSON.stringify({ status: ctx.authz.status, code: ctx.authz.code, creator: ctx.authz.creator ? ctx.authz.creator.id : null, identity: ctx.authz.identity, blocked: !!ctx.blocked }));
+  lines.push('Authorization: ' + JSON.stringify(p.authorization ? { method: p.authorization.method, creatorId: p.authorization.creatorId, fileVerified: p.authorization.fileVerified, at: p.authorization.at } : null));
+  if (ctx.dlError) lines.push('Last fetch error: ' + ctx.dlError);
+  if (ctx.authLog && ctx.authLog.length) { lines.push('--- authorization history (newest first) ---'); ctx.authLog.forEach((x) => lines.push(new Date(x.at).toISOString() + ' ' + x.event + ' ' + x.code + (x.creatorId ? ' [' + x.creatorId + ']' : '') + (x.detail ? ' · ' + x.detail : ''))); }
   if (ctx.yt) lines.push('YouTube details: ' + (ctx.yt.ok ? 'loaded' : 'unavailable (' + ctx.yt.code + ')'));
   lines.push('Project: ' + JSON.stringify({ id: p.id, video: p.video, hasBlob: p.hasBlob, clips: p.clipCount, analysisStatus: p.analysisStatus, analysisError: p.analysisError }));
   if (a) lines.push('Analysis: ' + JSON.stringify({ engine: a.engine, mode: a.mode, ms: a.ms, windows: a.windows, durationSec: a.durationSec, stats: a.stats, probe: a.probe, moments: a.moments }));
