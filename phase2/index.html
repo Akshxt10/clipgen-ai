@@ -7,6 +7,7 @@
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#06080e">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="ClipGen AI">
 <title>ClipGen AI</title>
@@ -21,27 +22,22 @@
     <span class="logo" aria-hidden="true">
       <svg viewBox="0 0 64 64" width="28" height="28"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8b7bff"/><stop offset="1" stop-color="#2fd4f0"/></linearGradient></defs><rect width="64" height="64" rx="16" fill="url(#lg)"/><path d="M24 18l22 14-22 14z" fill="#06080e"/></svg>
     </span>
-    <span class="brand-name">ClipGen <b>AI</b></span>
+    <span class="brand-name">ClipGen <b class="grad-text">AI</b></span>
   </a>
-  <div class="appbar-right">
-    <span class="pill pill-phase">Phase 2</span>
-    <button id="storageChip" class="chip" type="button" aria-live="polite">Checking storage…</button>
-  </div>
+  <nav class="topnav" id="topnav" aria-label="Main"></nav>
+  <a id="statusPill" class="status-pill" href="#/settings" aria-live="polite"><span class="dot"></span><span id="statusText">Connecting …</span></a>
 </header>
 
-<main id="view" class="wrap" aria-live="polite"></main>
+<main id="view" class="wrap" tabindex="-1"></main>
 
 <footer class="foot wrap">
-  <p>Free &amp; private: your video files stay on this device and are never uploaded. YouTube videos appear only inside YouTube’s own player. · <span id="appVersion"></span></p>
+  <p>ClipGen AI · Phase 2 · <a href="#/about" style="text-decoration:underline">About</a></p>
 </footer>
 
-<div id="busy" class="busy hidden" role="status" aria-live="assertive">
-  <div class="busy-card"><div class="spinner" aria-hidden="true"></div><div id="busyText">Working…</div></div>
-</div>
+<nav class="tabbar" id="tabbar" aria-label="Main"></nav>
 <div id="toasts" class="toasts" aria-live="polite"></div>
 
-<noscript><div class="wrap"><div class="banner banner-bad"><b>JavaScript is off</b>ClipGen AI needs JavaScript.</div></div></noscript>
-<script nomodule>document.getElementById('view').innerHTML='<div class="wrap"><div class="banner banner-bad"><b>Browser too old</b>Please update iOS / Safari (iOS 15 or newer is recommended).</div></div>';</script>
-<script type="module" src="app.js?v=2"></script>
+<noscript><p style="padding:24px">ClipGen AI needs JavaScript.</p></noscript>
+<script type="module" src="app.js"></script>
 </body>
 </html>

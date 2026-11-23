@@ -1,0 +1,12 @@
+{
+  "name": "clipgen-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ClipGen AI processing backend: URL ingest, chunked uploads, transcription, clip analysis, caption + reframe rendering. Zero npm dependencies.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test --test-concurrency=1 test/"
+  }
+}

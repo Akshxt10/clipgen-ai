@@ -1,36 +1,29 @@
-# ClipGen AI · Phase 2 — YouTube links + creator-approved source files
+# ClipGen AI — Phase 2
 
-Open: `https://akshxt10.github.io/clipgen-ai/phase2/` · Creators: `…/phase2/creator.html`
+Paste a link or upload a video → AI finds the best moments → pick, edit and download vertical clips with captions.
 
-Separate from `phase0/` and `phase1/` (both untouched). Plain HTML/CSS/JS, no build step, no paid services.
-Uses its own browser database (`clipgen-ai-p2`, now version 2 — upgraded in place, nothing is deleted).
+Web app: `https://akshxt10.github.io/clipgen-ai/phase2/` (static, hosted on GitHub Pages).
+It needs the **ClipGen backend** (folder `../backend`, Docker) because cutting video can't run on GitHub Pages.
+Setup: `../backend/DEPLOY.md`. Phase 0 and Phase 1 are separate and untouched.
 
-## What works
-- Paste a YouTube link (watch?v= · youtu.be · live · shorts) → validated → shown in YouTube's official player
-- Public title and channel (best effort, shown live, never saved)
-- **Creator check:** the app looks the channel up in the creator registry and reads the creator's signed approval.
-  If the creator is verified and approved the video, their original file is fetched from *their own host* and kept
-  only if it matches the SHA-256 they signed — no checkbox, no manual upload. Shown as “Verified source”.
-- If not verified, the app says exactly why and what is needed; you may still choose your own file and declare you
-  own it or have permission (labelled “Self-declared · not verified”)
-- Revoked / expired / invalid approvals block the project; unreachable hosts only produce a “could not re-check” note
-- **Creator Studio:** key, registration request, signed manifest builder, checker
-- Same Phase 1 engine for preview, loudness map, manual clips; direct upload unchanged
+## How it works for the user
+1. **Settings → Backend**: paste your backend address (and access token if you set one) → Connect. Remembered on the device.
+2. **Video input**: paste a direct video link (an `.mp4/.mov/.webm…` file URL, a Dropbox/Drive-style direct link), or **Upload** a file
+   (chunked, resumable, with progress).
+3. Choose clip settings: clip count, min/max length, platform (default YouTube Shorts), aspect, caption style, hook preference,
+   language, intensity.
+4. **AI analysis**: transcription with word timestamps, loudness and scene analysis, scoring → ranked clips (0–100 with reasons).
+5. **Preview** the real video segment with captions, **edit** (trim, caption text/style, aspect, reframing), **regenerate** a clip,
+   **render** it, **download** one MP4 or **Download all (ZIP)**.
+6. Library and History keep your projects/renders list on the device; the server deletes videos after the retention time (12 h by default).
 
-## What does NOT exist
-Transcription · automatic highlight detection · automatic clips · captions · 9:16 export.
-ClipGen AI never downloads or extracts anything from YouTube — see `CREATOR-AUTHORIZATION.md` for why a creator's
-approval cannot change that and what is done instead. **No creator is registered yet** (`registry/creators.json` is
-empty), so today every YouTube link takes the self-declared route.
+Sections: Dashboard · Video input · Upload · AI analysis · Clip generation · Clip editor · Clips library · Processing history · Settings · About.
 
-## Tested vs not tested
-Tested: unit tests (crypto, trust engine, URL parsing) and a headless-Chromium end-to-end suite with synthetic
-creators, a cross-origin file host, tampered/expired/forged/revoked cases, DB migration and Creator Studio round trip.
-Not tested: a real creator, a real file host (CORS behaviour), real YouTube, iPhone Safari.
+## What it does not do (by design)
+- It does **not** download from YouTube, TikTok, Instagram, Facebook, X, Vimeo, Twitch, etc. Those pages don't give a video file;
+  the app says so and offers upload. No yt-dlp, scraping, unofficial APIs or DRM/login circumvention.
+- Users are responsible for having the rights to the videos they process.
 
-## Files (all in this folder)
-`index.html` · `styles.css` · `app.js` · `youtube.js` · `pipeline.js` · `db.js` · `audio.js` · `timeline.js` ·
-`ffmpeg-engine.js` · `ffmpeg-worker.js` · `crypto-utils.js` · `authz.js` · `source-fetch.js` · `creator.html` ·
-`creator.js` · `registry/creators.json` · `ARCHITECTURE.md` · `CREATOR-AUTHORIZATION.md`
-
-`audio.js`, `timeline.js`, `ffmpeg-engine.js`, `ffmpeg-worker.js` are exact copies of the Phase 1 files.
+## Files
+`index.html`, `styles.css`, `app.js` (router), `config.js` (default backend address), `js/` (api, conn, state, ui, preview,
+components, views/*). Plain ES modules, no build step.
