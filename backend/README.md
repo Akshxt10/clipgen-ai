@@ -2,11 +2,11 @@
 
 Zero-dependency Node ≥ 20 service that does the real work: fetches or receives a video, transcribes it (whisper.cpp),
 analyses audio/scenes, ranks clip candidates, reframes and renders with FFmpeg, burns captions, and serves previews,
-downloads and ZIPs. See `DEPLOY.md` to run it and `../phase2/ARCHITECTURE.md` for the design.
+downloads and ZIPs. See `DEPLOY.md` (Oracle Cloud Always Free + automatic HTTPS; scripts in `deploy/oracle/`) to run it and `../phase2/ARCHITECTURE.md` for the design.
 
 ```
 npm start                # node src/index.js   (needs ffmpeg + ffprobe on PATH)
-npm test                 # unit + API tests (real FFmpeg, synthetic videos)
+npm test                 # unit + API + deploy-script tests (real FFmpeg, synthetic videos)
 node test/e2e/e2e.mjs    # browser E2E (needs Playwright + Chromium)
 ```
 

@@ -7,6 +7,6 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test --test-concurrency=1 test/"
+    "test": "node --test --test-concurrency=1 --test-timeout=280000 test/unit.test.js test/api.test.js test/deploy.test.js"
   }
 }
