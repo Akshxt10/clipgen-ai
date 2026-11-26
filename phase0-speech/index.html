@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d14">
+<title>ClipGen AI · Speech captions test</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main>
+  <h1>ClipGen AI · Speech captions test</h1>
+  <p class="sub">Your own video → on-device speech recognition → your real spoken words burned into a 9:16 export. Nothing is uploaded anywhere.</p>
+
+  <div id="crashBanner" class="banner bad hidden"></div>
+
+  <section class="card">
+    <h2>1 · Choose your video</h2>
+    <label for="file">Video with speech (20–30 s is perfect)</label>
+    <input id="file" type="file" accept="video/*,.mp4,.mov,.m4v,.mkv,.webm">
+    <p class="note">Tap “Choose Files” (not “Photo Library”) so Safari gets your original file.</p>
+    <div class="row">
+      <div><label for="startSec">Start at (seconds)</label><input id="startSec" type="number" min="0" step="1" value="0" inputmode="numeric"></div>
+      <div><label for="lenSec">Length (seconds)</label><input id="lenSec" type="number" min="3" max="30" step="1" value="10" inputmode="numeric"></div>
+    </div>
+    <label for="model">Speech model</label>
+    <select id="model"></select>
+    <div id="langRow" class="hidden">
+      <label for="lang">Language spoken</label>
+      <select id="lang">
+        <option value="auto">Detect automatically</option>
+        <option value="hindi">Hindi</option><option value="english">English</option><option value="spanish">Spanish</option>
+        <option value="french">French</option><option value="german">German</option><option value="portuguese">Portuguese</option>
+        <option value="italian">Italian</option><option value="indonesian">Indonesian</option>
+      </select>
+      <p class="note">Captions are drawn with a Latin-letter font for now. Hindi and other non-Latin scripts will be recognized and shown below, but the burned-in text would show empty boxes.</p>
+    </div>
+    <label for="truth">What did you actually say? (optional, lets the page measure accuracy)</label>
+    <textarea id="truth" rows="2" placeholder="Type the sentence(s) you spoke in the first seconds"></textarea>
+    <button id="btnRun" class="btn" disabled>▶ Recognize speech and export</button>
+    <button id="btnCancel" class="btn danger hidden">■ Cancel</button>
+    <p class="note">First run downloads the video engine (~32 MB) and the speech model (40–80 MB). Keep this tab open and the screen on.</p>
+  </section>
+
+  <section class="card">
+    <h2>2 · Progress</h2>
+    <div class="plabel"><span id="plabel">Idle — choose a video.</span><span id="pelapsed"></span></div>
+    <div class="bar"><i id="pfill"></i></div>
+    <ol class="steps" id="steps"></ol>
+  </section>
+
+  <section class="card hidden" id="resultCard">
+    <h2>3 · Result</h2>
+    <div id="verdict" class="banner"></div>
+    <video id="vid" controls playsinline preload="metadata"></video>
+    <p class="note"><a id="dl" class="hidden" download="clipgen-speech-captions.mp4">Download MP4</a></p>
+    <h3>Words the phone recognized</h3>
+    <p class="note">These are the exact words and times that were burned into the video. If this is not what you said, the recognition is wrong — it is not a display problem.</p>
+    <div id="transcript"></div>
+    <h3>Your check</h3>
+    <p class="note">Play the video. Do the on-screen words match what you said, at the right moment?</p>
+    <div class="row">
+      <label class="radio"><input type="radio" name="mine" value="yes"> Yes</label>
+      <label class="radio"><input type="radio" name="mine" value="mostly"> Mostly</label>
+      <label class="radio"><input type="radio" name="mine" value="no"> No</label>
+    </div>
+    <table id="metrics"></table>
+  </section>
+
+  <section class="card hidden" id="reportCard">
+    <h2>4 · Report (paste this back to Claude)</h2>
+    <textarea id="report" readonly rows="14"></textarea>
+    <button id="btnCopy" class="btn">Copy report</button>
+  </section>
+
+  <section class="card">
+    <h2>Log</h2>
+    <details><summary>Show live log</summary><pre id="log"></pre></details>
+  </section>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
