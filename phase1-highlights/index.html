@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d14">
+<title>ClipGen AI · Find highlights</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main>
+  <h1>ClipGen AI · Find highlights</h1>
+  <p class="sub">Phase 1 · step 1. Your video → on-device speech recognition + loudness → ranked highlight moments you can preview. Nothing is uploaded.</p>
+
+  <div id="crashBanner" class="banner bad hidden"></div>
+
+  <section class="card">
+    <h2>1 · Choose your video</h2>
+    <label for="file">Video with speech</label>
+    <input id="file" type="file" accept="video/*,.mp4,.mov,.m4v,.mkv,.webm">
+    <p class="note" id="fileInfo">Tap “Choose Files” (not “Photo Library”) so Safari gets your original file.</p>
+    <div class="row">
+      <div><label for="startSec">Start at (seconds)</label><input id="startSec" type="number" min="0" step="1" value="0" inputmode="numeric"></div>
+      <div><label for="lenSec">Analyse how many seconds</label><input id="lenSec" type="number" min="5" max="600" step="1" value="60" inputmode="numeric"></div>
+    </div>
+    <div class="row">
+      <div><label for="numClips">How many clips</label><input id="numClips" type="number" min="1" max="10" step="1" value="3" inputmode="numeric"></div>
+      <div><label for="intensity">Pickiness</label><select id="intensity"><option value="balanced">Balanced</option><option value="aggressive">More clips</option><option value="conservative">Only the best</option></select></div>
+    </div>
+    <div class="row">
+      <div><label for="minLen">Shortest clip (s)</label><input id="minLen" type="number" min="5" max="120" step="1" value="10" inputmode="numeric"></div>
+      <div><label for="maxLen">Longest clip (s)</label><input id="maxLen" type="number" min="8" max="180" step="1" value="30" inputmode="numeric"></div>
+    </div>
+    <label for="model">Speech model</label>
+    <select id="model"></select>
+    <button id="btnRun" class="btn" disabled>▶ Find highlights</button>
+    <button id="btnCancel" class="btn danger hidden">■ Cancel</button>
+    <p class="note">The speech model and video engine download on first use and are cached (the same ones as the speech-caption test). Keep this tab open and the screen on.</p>
+  </section>
+
+  <section class="card">
+    <h2>2 · Progress</h2>
+    <div class="plabel"><span id="plabel">Idle — choose a video.</span><span id="pelapsed"></span></div>
+    <div class="bar"><i id="pfill"></i></div>
+    <ol class="steps" id="steps"></ol>
+  </section>
+
+  <section class="card hidden" id="resultCard">
+    <h2>3 · Highlights</h2>
+    <div id="verdict" class="banner"></div>
+    <canvas id="wave" width="640" height="70"></canvas>
+    <p class="note">Loudness over the analysed part. Coloured bands are the suggested clips.</p>
+    <video id="vid" controls playsinline preload="metadata"></video>
+    <div id="clips"></div>
+    <h3>Your check</h3>
+    <p class="note">Preview the clips. Do the top picks look like moments you would really post?</p>
+    <div class="row">
+      <label class="radio"><input type="radio" name="mine" value="yes"> Yes</label>
+      <label class="radio"><input type="radio" name="mine" value="mostly"> Mostly</label>
+      <label class="radio"><input type="radio" name="mine" value="no"> No</label>
+    </div>
+    <table id="metrics"></table>
+  </section>
+
+  <section class="card hidden" id="reportCard">
+    <h2>4 · Report (paste this back to Claude)</h2>
+    <textarea id="report" readonly rows="14"></textarea>
+    <button id="btnCopy" class="btn">Copy report</button>
+  </section>
+
+  <section class="card">
+    <h2>Log</h2>
+    <details><summary>Show live log</summary><pre id="log"></pre></details>
+  </section>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
