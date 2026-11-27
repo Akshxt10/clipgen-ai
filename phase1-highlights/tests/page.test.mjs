@@ -79,6 +79,7 @@ async function newPage(ctx, { recognizer, source }) {
     };
     if (useRecognizer === 'fixture') window.__CLIPGEN_TEST__.recognize = async () => ({ text: 'FIXTURE', chunks: fixture });
     if (useRecognizer === 'short') window.__CLIPGEN_TEST__.recognize = async () => ({ text: 'FIXTURE', chunks: 'hello everyone this is a quick test of the new caption feature and it works well on my phone'.split(' ').map((w, i) => ({ text: ' ' + w, timestamp: [0.5 + i * 0.5, 0.5 + i * 0.5 + 0.42] })) });
+    if (useRecognizer === 'dangling') window.__CLIPGEN_TEST__.recognize = async () => ({ text: 'FIXTURE', chunks: 'so we talked about the ads and how people react to the ad and then I said well you know it is just the way that the market works when you put the ad-'.split(' ').map((w, i) => ({ text: ' ' + w, timestamp: [0.5 + i * 0.3, 0.5 + i * 0.3 + 0.26] })) });
     if (useRecognizer === 'empty') window.__CLIPGEN_TEST__.recognize = async () => ({ text: '', chunks: [] });
   }, { useRecognizer: recognizer, fixture: FIXTURE });
   await page.goto(base + 'index.html');
@@ -117,7 +118,11 @@ test('happy path: loudness + (fixture) transcript → ranked clips, checks pass,
   // the waveform canvas is actually drawn
   const painted = await page.evaluate(() => { const c = document.querySelector('#wave'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++; return n; });
   assert.ok(painted > 500, 'waveform painted: ' + painted);
+  const pageText = await page.textContent('#resultCard');
+  assert.ok(!/visual changes|scene cut/i.test(pageText.replace('no scene-cut claims are made', '')), 'no scene claims on the page');
+  assert.match(pageText, /Scene detection\s*not run/);
   const report = await page.inputValue('#report');
+  assert.match(report, /SCENE DETECTION: not run/);
   assert.match(report, /CLIP #1 /);
   assert.match(report, /TRANSCRIPT: so today we are going/);
   assert.deepEqual(errors, []);
@@ -166,6 +171,20 @@ test('short clip (like a 10 s phone test): settings are relaxed AND the page say
   const c = await page.evaluate(() => window.__highlightsTest.run.clips[0]);
   assert.match(c.transcript, /hello everyone/);
   assert.ok(await page.evaluate(() => window.__highlightsTest.run.check.ok));
+  await ctx.close();
+});
+
+test('a clip cut mid-sentence is shown with a visible warning, not presented as clean', async () => {
+  const ctx = await browser.newContext();
+  const { page } = await newPage(ctx, { recognizer: 'dangling', source: short });
+  await runIt(page, short, { lenSec: 12, minLen: 10, maxLen: 30, numClips: 3 });
+  const card = await page.textContent('#clips');
+  const verdict = await page.textContent('#verdict');
+  console.log('DANGLING CARD:', card.replace(/\s+/g, ' ').slice(0, 420));
+  assert.match(card, /⚠ May end mid-sentence \(the last word is “ad-”\)/);
+  assert.match(verdict, /⚠ warning/);
+  assert.ok(!/Starts and ends cleanly/.test(card));
+  assert.match(await page.inputValue('#report'), /CAVEATS: May end mid-sentence/);
   await ctx.close();
 });
 

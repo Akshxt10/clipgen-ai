@@ -38,3 +38,4 @@ a{color:var(--accent)}summary{cursor:pointer;color:var(--mute)}
 .btn.small{display:inline-block;width:auto;margin:6px 8px 0 0;padding:8px 14px;font-size:14px}
 canvas#wave{width:100%;height:70px;display:block;background:#0e1120;border-radius:8px}
 .ok-t{color:var(--ok)}.bad-t{color:var(--bad)}
+.clip ul.warnl{color:var(--warn)}

@@ -279,6 +279,7 @@ function renderClips() {
       '<div class="note" style="margin:0">' + clock(c.start + run.opts.start) + ' – ' + clock(c.end + run.opts.start) + ' in your video · ' + c.duration.toFixed(1) + ' s · highlight score (heuristic)</div>' +
       '<div>' + c.categories.map((t) => '<span class="tag">' + esc(t) + '</span>').join('') + '</div>' +
       '<ul>' + c.reasons.map((r) => '<li>' + esc(r) + '</li>').join('') + '</ul>' +
+      (c.caveats && c.caveats.length ? '<ul class="warnl">' + c.caveats.map((r) => '<li>⚠ ' + esc(r) + '</li>').join('') + '</ul>' : '') +
       (c.transcript ? '<div class="tx">“' + esc(c.transcript) + '”</div>' : '<div class="note">No transcript for this clip (loudness only).</div>') +
       '<button class="btn small" data-play="' + k + '">▶ Preview</button>' +
     '</div>').join('');
@@ -302,6 +303,8 @@ function verdictFor(ok, err) {
   if (!run.check.ok) issues.push('Some automatic checks failed: ' + run.check.problems.slice(0, 3).join('; '));
   if (run.analysis.mode !== 'transcript') issues.push('No usable transcript, so these picks use loudness only.');
   if (run.lowConfidence) issues.push('Nothing qualified with your settings, so they were relaxed (' + run.relaxed + '). Treat these as weak candidates.');
+  const warned = run.clips.filter((c) => c.caveats && c.caveats.length).length;
+  if (warned) issues.push(warned + ' of the clips carry a ⚠ warning (possible mid-sentence cut or unreliable transcript) — see the cards.');
   if (run.sync && run.sync.onSpeech !== null && run.sync.onSpeech < 0.6) issues.push('Only ' + Math.round(run.sync.onSpeech * 100) + '% of word times line up with audible sound.');
   if (issues.length) return { kind: 'warn', title: run.clips.length + ' highlight(s) found, with caveats', body: issues.join('\n') + '\nScores are heuristics — preview each clip and judge it yourself.' };
   return { kind: 'ok', title: run.clips.length + ' highlight(s) found', body: 'Automatic checks passed (clips are well-formed and cut between words). Whether they are GOOD highlights is your call — preview them and answer the box below.' };
@@ -316,6 +319,7 @@ function showResult(ok, errMsg) {
   const row = (k, val) => m.push('<tr><td>' + esc(k) + '</td><td>' + esc(val) + '</td></tr>');
   if (run.rec.model) row('Speech model', run.rec.model.id + ' · ' + run.rec.model.lib);
   if (run.rec.asr) row('Recognition', run.rec.asr.words + ' words · ' + sec(run.rec.asr.ms) + ' · ' + ((run.dur * 1000) / run.rec.asr.ms).toFixed(2) + '× real-time');
+  row('Scene detection', 'not run in this version — no scene-cut claims are made');
   if (run.rec.analysis) row('Analysis mode', run.rec.analysis.mode + ' · ' + run.rec.analysis.stats.candidates + ' candidates');
   if (run.sync && run.sync.onSpeech !== null) row('Words on audible sound', Math.round(run.sync.onSpeech * 100) + '%');
   const last = run.mem[run.mem.length - 1];
@@ -336,7 +340,8 @@ function buildReport(ok, errMsg) {
   if (r.asr) L.push('ASR: timing=' + r.asr.timing + ' · ' + r.asr.words + ' words in ' + sec(r.asr.ms) + ' · ' + r.model.id + ' · ' + r.asr.lib);
   if (run.words && run.words.length) L.push('TRANSCRIPT: ' + run.words.map((x) => x.w).join(' ').slice(0, 1200));
   if (r.analysis) L.push('ANALYSIS: mode=' + r.analysis.mode + ' lowConfidence=' + r.analysis.lowConfidence + ' stats=' + JSON.stringify(r.analysis.stats));
-  if (run.clips) for (const c of run.clips) L.push('CLIP #' + c.rank + ' ' + c.start.toFixed(1) + '–' + c.end.toFixed(1) + ' s (video ' + clock(c.start + run.opts.start) + '–' + clock(c.end + run.opts.start) + ') score ' + c.score + ' [' + c.categories.join(', ') + '] “' + (c.transcript || '').slice(0, 140) + '” reasons: ' + c.reasons.join(' | '));
+  L.push('SCENE DETECTION: not run (analysis stats scenes=' + (run.rec.analysis ? run.rec.analysis.stats.scenes : 'n/a') + '); per-word recognizer confidence: not provided by this recognizer');
+  if (run.clips) for (const c of run.clips) L.push('CLIP #' + c.rank + ' ' + c.start.toFixed(1) + '–' + c.end.toFixed(1) + ' s (video ' + clock(c.start + run.opts.start) + '–' + clock(c.end + run.opts.start) + ') score ' + c.score + ' [' + c.categories.join(', ') + '] “' + (c.transcript || '').slice(0, 140) + '” reasons: ' + c.reasons.join(' | ') + (c.caveats && c.caveats.length ? ' CAVEATS: ' + c.caveats.join(' | ') : '') + ' reliability=' + (c.signals.reliability !== undefined ? c.signals.reliability : 'n/a'));
   if (r.checks) L.push('CHECKS: ' + JSON.stringify({ ok: r.checks.clipChecks.ok, problems: r.checks.clipChecks.problems, sync: r.checks.sync }));
   L.push('MEMORY: ' + (run.mem.length ? run.mem.map((m) => m.tag + ' wasm=' + (m.wasmMB || 'n/a')).join(' | ') : 'n/a'));
   L.push('STEP TIMES (ms): ' + JSON.stringify(run.timing));

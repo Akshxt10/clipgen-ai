@@ -24,3 +24,5 @@ export const CONTINUATION_START = /^(and|but|so|because|which|that|or|then|also|
 export const NUMBER = /\b\d[\d,.]*\b|\b(one|two|three|four|five|six|seven|eight|nine|ten|hundred|thousand|million|billion)\b/i;
 
 export const normWord = (w) => String(w).toLowerCase().replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, '');
+// Words a sentence cannot sensibly end on. A clip whose last word is one of these (or a trailing dash/comma) was cut mid-thought.
+export const DANGLING_END = set(`a an the and or but so to of with that which because if for in on at by from as than then who whom whose when where while although though since until unless whether my your his her its our their this these those some any each every both either neither is are was were be been am will would can could should may might must do does did has have had not no very really just also too more most`);
