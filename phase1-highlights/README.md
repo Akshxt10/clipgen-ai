@@ -32,6 +32,20 @@ no scene detection had run. Fixes in `analyze.js` (shared with `backend/src/anal
 - **Hard limits.** Clips always stay inside the video, within your shortest/longest length (padding can no longer push past the maximum),
   and never overlap (the "More clips" setting used to allow 10% overlap; it no longer does).
 
+## Memory safety and crash recovery (after a real-iPhone run stopped during “Recognize your speech”)
+The cause on that phone is NOT confirmed (the sandbox cannot see iPhone memory). Two likely contributors were removed, and recovery was added:
+- The video engine stays loaded while Whisper loads → it is now released right after the audio is extracted.
+- All the audio went to Whisper in one call → it is now recognized in parts of ~20 s (never more than 27 s), cut at the quietest moment
+  near each target so a word is not sliced. Each part's start offset is applied to its word times, so the timeline is exact
+  (a test proves chunked output equals a single pass). The speech engine is rebuilt every 4 parts to give its memory back.
+- Every finished part is saved (localStorage, 24 h, tied to the exact file + settings + model). After a crash, choose the same video again
+  and tap Find highlights: saved parts are reused and only the rest is recognized. Another video, other settings or another model never reuse them.
+- The page writes breadcrumbs as it runs. After a crash the next load says which step and speech part it stopped in, whether the page was in
+  the background / phone locked, how many parts were saved and what to do, restores your settings, and offers the smaller model.
+  Closing or reloading the page is told apart from a silent kill. The screen-lock request is renewed when Safari comes back to the front.
+- Limits: if the phone is short of memory, the smaller model may still be needed; I cannot promise this fixes your phone until you re-test.
+  Resume needs the same file re-selected (Safari cannot keep a file across reloads).
+
 ## Honest limits
 - Scores are **heuristics**, not human judgement. The automatic checks prove the clips are well-formed, not that they are good.
   Whether they are good highlights is your call (the page asks).
@@ -40,6 +54,7 @@ no scene detection had run. Fixes in `analyze.js` (shared with `backend/src/anal
 - If nothing qualifies, the page relaxes the settings step by step and tells you; if it still finds nothing it says so.
 - If no usable transcript, it uses loudness only and labels the result.
 - Window is capped at 600 s per run; recognition speed on a phone is measured by the report, not assumed.
+- Chunk-border words: a word cut by a part border can lose its tail; cuts are placed in pauses to make this rare.
 
 ## Tests (`node --test phase1-highlights/tests/*.test.mjs`)
 - `logic.test.mjs`: drift guard, loudness maths, ranking on a labelled synthetic signal + fixture transcript, determinism, audio-only mode, silence → zero clips, clip checks.

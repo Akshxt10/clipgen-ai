@@ -15,9 +15,11 @@ import { normalizeWords, syncCheck, rmsDb } from '../phase0-speech/captions.js';
 import { analyzeVideo, normalizeSettings } from './analyze.js';
 import { loudnessFromPcm } from './loudness.js';
 import { checkClips } from './checks.js';
+import { planChunks, checkpointKey, transcribeChunked } from './asr-chunks.js';
 
-const VERSION = 'highlights-v1';
+const VERSION = 'highlights-v2';
 const FLAG_KEY = 'clipgen-highlights-run';
+const CKPT_KEY = 'clipgen-highlights-ckpt';
 const RATE = 16000;
 const MAX_WINDOW = 600;
 
@@ -72,9 +74,20 @@ function banner(el, kind, title, body) {
   el.className = 'banner ' + kind;
   el.innerHTML = '<b>' + esc(title) + '</b>' + (body ? esc(body).replace(/\n/g, '<br>') : '');
 }
-const setFlag = (step) => { try { localStorage.setItem(FLAG_KEY, JSON.stringify({ step, t: Date.now() })); } catch (_) { /* private mode */ } };
-const clearFlag = () => { try { localStorage.removeItem(FLAG_KEY); } catch (_) { /* ignore */ } };
+/* Breadcrumbs for crash recovery. If Safari kills the tab no code runs, so everything the NEXT page load needs to explain what happened
+   (which step, which speech part, whether the page was in the background) is written down as we go. */
+let flag = {};
+const writeFlag = () => { try { localStorage.setItem(FLAG_KEY, JSON.stringify(flag)); } catch (_) { /* private mode */ } };
+const patchFlag = (o) => { flag = Object.assign({}, flag, o, { t: Date.now() }); writeFlag(); };
+const setFlag = (step) => patchFlag({ step });
+const clearFlag = () => { flag = {}; try { localStorage.removeItem(FLAG_KEY); } catch (_) { /* ignore */ } };
 const readFlag = () => { try { const v = localStorage.getItem(FLAG_KEY); return v ? JSON.parse(v) : null; } catch (_) { return null; } };
+/* finished speech parts survive a crash here, so a retry does not start from zero */
+const ckptStore = {
+  load: () => { try { const v = localStorage.getItem(CKPT_KEY); return v ? JSON.parse(v) : null; } catch (_) { return null; } },
+  save: (o) => { localStorage.setItem(CKPT_KEY, JSON.stringify(o)); },
+  clear: () => { try { localStorage.removeItem(CKPT_KEY); } catch (_) { /* ignore */ } }
+};
 
 /* ---------------- engine helpers ---------------- */
 async function runExec(label, args) {
@@ -95,6 +108,7 @@ class ExecError extends Error {
 }
 async function memSnap(tag) {
   const o = { tag };
+  if (!st.engine) { o.note = 'video engine already released'; run.mem.push(o); return; }
   try { const b = await st.engine.memInfo(); if (typeof b === 'number') o.wasmMB = +(b / 1048576).toFixed(0); } catch (_) { /* n/a */ }
   run.mem.push(o);
 }
@@ -190,36 +204,71 @@ async function stepLoud() {
   run.loud = loudnessFromPcm(run.pcm, RATE, 0.25);
   const v = run.loud.rmsDb;
   run.rec.loudness = { windows: v.length, minDb: Math.min.apply(null, v), maxDb: Math.max.apply(null, v) };
-  return { note: v.length + ' windows · ' + run.rec.loudness.minDb + ' to ' + run.rec.loudness.maxDb + ' dB' };
+  // The video engine is not needed again. Release it NOW so its memory is free before the speech model loads
+  // (on a phone, both side by side is the most likely reason Safari closes the tab).
+  try { if (st.engine) st.engine.terminate(); } catch (_) { /* ignore */ }
+  st.engine = null; run.engineReleased = true; run.rec.engineReleasedBeforeSpeech = true;
+  addLog('[highlights] video engine released before speech recognition');
+  return { note: v.length + ' windows · ' + run.rec.loudness.minDb + ' to ' + run.rec.loudness.maxDb + ' dB\nvideo engine released to free memory' };
 }
 async function stepModel() {
   const spec = MODELS[run.opts.model];
   run.label = 'Loading the speech model …';
-  st.rec = createRecognizer({
+  run.makeRec = () => (st.rec = createRecognizer({
     model: run.opts.model, language: 'auto',
-    onStatus: (t) => { run.label = t; addLog('[speech] ' + t); },
-    onProgress: (p) => { run.label = 'Downloading the speech model … ' + p.loadedMB.toFixed(0) + (p.totalMB ? ' / ' + p.totalMB.toFixed(0) : '') + ' MB'; if (p.totalMB) run.frac = clamp(p.loadedMB / p.totalMB, 0, 0.98); }
-  });
+    onStatus: (t) => { if (run.current === 'model') run.label = t; addLog('[speech] ' + t); },
+    onProgress: (p) => { if (run.current !== 'model') return; run.label = 'Downloading the speech model … ' + p.loadedMB.toFixed(0) + (p.totalMB ? ' / ' + p.totalMB.toFixed(0) : '') + ' MB'; if (p.totalMB) run.frac = clamp(p.loadedMB / p.totalMB, 0, 0.98); }
+  }));
+  run.makeRec();
   const r = await st.rec.init();
   run.rec.model = { id: spec.id, lib: r.lib };
   await memSnap('after-model');
   return { note: spec.id + ' · ' + r.lib };
 }
 async function stepAsr() {
-  run.label = 'Recognizing speech … (about ' + Math.max(1, Math.round(run.dur / 60)) + '+ min of audio — this can take a while on a phone)'; run.frac = 0.05;
-  const r = await st.rec.recognize(run.pcm);
-  if (run.cancelled) throw new Error('Cancelled');
+  // Recognize in parts of ~20 s (cut at pauses), one after another. Each finished part is saved, the speech engine is rebuilt
+  // every 4 parts to return its memory, and a retry after a crash continues from the saved parts.
+  const o = run.opts;
+  const plan = run.plan = planChunks(run.loud, run.dur);
+  const key = checkpointKey(o.file, o.start, o.len, o.model, plan);
+  patchFlag({ chunk: { k: 0, n: plan.length } });
+  const first = st.rec; let firstUsed = false;
+  const makeRecognizer = () => {
+    if (!firstUsed) { firstUsed = true; return { init: async () => {}, recognize: (a) => first.recognize(a), dispose: () => first.dispose() }; }   // already loaded in the previous step
+    return run.makeRec();
+  };
+  let r;
+  try {
+    r = await transcribeChunked({
+      pcm: run.pcm, rate: RATE, plan, makeRecognizer, key, store: ckptStore, recycleEvery: 4, isCancelled: () => run.cancelled,
+      onPart: (p) => {
+        run.frac = p.k / p.n;
+        run.label = 'Recognizing speech: part ' + (p.k + 1) + ' of ' + p.n + ' (' + Math.round(p.s) + '–' + Math.round(p.e) + ' s)' + (p.resumed ? ' — reusing saved result' : '');
+        patchFlag({ chunk: { k: p.k, n: p.n } });
+        addLog('[speech] ' + run.label);
+      }
+    });
+  } catch (e) {
+    if (run.cancelled) throw e;
+    const done = e.partsDone || 0, total = e.partsTotal || plan.length;
+    run.rec.asrFailure = { failedPart: e.failedPart, partsDone: done, partsTotal: total };
+    const hint = done > 0
+      ? '\nNothing is lost: ' + done + ' of ' + total + ' speech parts were saved. Choose the same video again, keep the same settings and tap Find highlights to continue from part ' + (done + 1) + '.'
+      : '\nTap Find highlights to try again. If it keeps stopping, pick “English · fast” as the speech model, close other apps and tabs, and keep Safari open on this page.';
+    const err = new Error(msg(e) + hint); err.step = 'asr'; throw err;
+  }
   run.raw = r;
   run.words = normalizeWords(r.chunks, run.dur);
-  run.rec.asr = { timing: r.timing || 'word', ms: Math.round(r.ms), lib: r.lib, rawChunks: (r.chunks || []).length, words: run.words.length };
+  run.rec.asr = { timing: r.timing || 'word', ms: Math.round(r.ms), lib: (st.rec && run.rec.model && run.rec.model.lib) || null, rawChunks: (r.chunks || []).length, words: run.words.length, parts: r.parts.length, resumedParts: r.resumed, recycles: r.recycles, plan: plan.map((p) => p.s + '-' + p.e), partMs: r.parts.map((p) => Math.round(p.ms)) };
   await memSnap('after-asr');
-  const rtf = (run.dur * 1000) / r.ms;
+  const rtf = r.ms ? (run.dur * 1000) / r.ms : 0;
+  const partsNote = r.parts.length + ' part(s)' + (r.resumed ? ', ' + r.resumed + ' reused from the saved run' : '') + (r.recycles ? ', speech engine rebuilt ' + r.recycles + '×' : '');
   if (run.words.length < 5) {
     // not fatal: analyze.js falls back to audio-only scoring and the page says so
-    return { status: 'warn', note: '! only ' + run.words.length + ' word(s) recognized — highlights will use loudness only (no transcript)\n' + sec(r.ms) + ' (' + rtf.toFixed(2) + '× real-time)' };
+    return { status: 'warn', note: '! only ' + run.words.length + ' word(s) recognized — highlights will use loudness only (no transcript)\n' + partsNote };
   }
   const approx = r.timing === 'phrase';
-  return { status: approx ? 'warn' : 'ok', note: (approx ? '! word times are estimated from phrase times\n' : '') + run.words.length + ' words in ' + sec(r.ms) + ' (' + rtf.toFixed(2) + '× real-time)\n“' + run.words.slice(0, 18).map((x) => x.w).join(' ') + (run.words.length > 18 ? ' …' : '') + '”' };
+  return { status: approx ? 'warn' : 'ok', note: (approx ? '! word times are estimated from phrase times\n' : '') + run.words.length + ' words · ' + partsNote + ' · ' + sec(r.ms) + ' of recognition' + (rtf ? ' (' + rtf.toFixed(2) + '× real-time)' : '') + '\n“' + run.words.slice(0, 18).map((x) => x.w).join(' ') + (run.words.length > 18 ? ' …' : '') + '”' };
 }
 async function stepAnalyze() {
   const o = run.opts;
@@ -338,6 +387,9 @@ function buildReport(ok, errMsg) {
   if (r.audio) L.push('AUDIO: ' + r.audio.seconds + ' s · level ' + r.audio.rmsDb + ' dBFS · extracted in ' + sec(r.audio.ms));
   if (r.loudness) L.push('LOUDNESS: ' + JSON.stringify(r.loudness));
   if (r.asr) L.push('ASR: timing=' + r.asr.timing + ' · ' + r.asr.words + ' words in ' + sec(r.asr.ms) + ' · ' + r.model.id + ' · ' + r.asr.lib);
+  if (r.asr) L.push('ASR PARTS: ' + r.asr.parts + ' (reused ' + r.asr.resumedParts + ', engine rebuilt ' + r.asr.recycles + '×) · plan ' + r.asr.plan.join(' ') + ' · ms per part ' + r.asr.partMs.join(','));
+  if (r.asrFailure) L.push('ASR FAILURE: stopped in part ' + (r.asrFailure.failedPart + 1) + ' of ' + r.asrFailure.partsTotal + ' · parts saved ' + r.asrFailure.partsDone);
+  L.push('VIDEO ENGINE RELEASED BEFORE SPEECH: ' + (r.engineReleasedBeforeSpeech ? 'yes' : 'no') + ' · page in background during run: ' + (flag.hiddenCount || 0) + '× / ' + Math.round((flag.hiddenMs || 0) / 1000) + ' s');
   if (run.words && run.words.length) L.push('TRANSCRIPT: ' + run.words.map((x) => x.w).join(' ').slice(0, 1200));
   if (r.analysis) L.push('ANALYSIS: mode=' + r.analysis.mode + ' lowConfidence=' + r.analysis.lowConfidence + ' stats=' + JSON.stringify(r.analysis.stats));
   L.push('SCENE DETECTION: not run (analysis stats scenes=' + (run.rec.analysis ? run.rec.analysis.stats.scenes : 'n/a') + '); per-word recognizer confidence: not provided by this recognizer');
@@ -371,6 +423,8 @@ async function start() {
   if (st.videoUrl) { try { URL.revokeObjectURL(st.videoUrl); } catch (_) { /* ignore */ } st.videoUrl = null; $('#vid').removeAttribute('src'); }
   run = { opts, rec: { version: VERSION }, steps: {}, timing: {}, errors: [], mem: [], t0: performance.now(), cancelled: false, current: null, frac: 0, label: 'Starting …', clips: [] };
   st.running = true;
+  $('#crashBanner').classList.add('hidden');
+  patchFlag({ step: 'env', version: VERSION, model: opts.model, start: opts.start, len: opts.len, file: { name: file.name, size: file.size }, chunk: null, hiddenCount: 0, hiddenMs: 0, hiddenNow: false, hiddenSince: null, unloaded: false });
   buildSteps();
   $('#log').textContent = '';
   $('#resultCard').classList.add('hidden'); $('#reportCard').classList.add('hidden');
@@ -427,6 +481,42 @@ function readDuration(file) {
   v.onerror = () => { st.videoDuration = null; $('#fileInfo').textContent = file.name + ' · ' + mb(file.size) + ' · (this browser could not read the length — set “Analyse how many seconds” yourself)'; done(); };
   v.src = u;
 }
+/* the phone locking or Safari going to the background can suspend or kill the run: record it, and get the screen-lock back */
+function onVisibility() {
+  if (!st.running) return;
+  if (document.visibilityState === 'hidden' && flag.unloaded) return;     // browsers fire pagehide, THEN hidden, when a page is closed or reloaded
+  if (document.visibilityState === 'hidden') patchFlag({ hiddenNow: true, hiddenSince: Date.now(), hiddenCount: (flag.hiddenCount || 0) + 1 });
+  else {
+    patchFlag({ hiddenNow: false, hiddenMs: (flag.hiddenMs || 0) + (flag.hiddenSince ? Date.now() - flag.hiddenSince : 0), hiddenSince: null });
+    try { if ('wakeLock' in navigator) navigator.wakeLock.request('screen').then((w) => { run.wake = w; }).catch(() => {}); } catch (_) { /* optional */ }
+  }
+}
+/* explain a run that never reported back (tab killed or reloaded) and say exactly what to do */
+function showRecovery() {
+  const f = readFlag();
+  if (!f || !f.step) { clearFlag(); return; }
+  clearFlag();
+  const stepName = (STEPS.find((s) => s[0] === f.step) || [])[1] || f.step;
+  const lines = [];
+  lines.push('It stopped during “' + stepName + '”' + (f.chunk && f.chunk.n && (f.step === 'asr') ? ', speech part ' + (f.chunk.k + 1) + ' of ' + f.chunk.n : '') + (f.file ? ' (' + f.file.name + ', ' + f.model + ')' : '') + '.');
+  if (f.hiddenNow) lines.push('Safari was in the background or the phone was locked at that moment — iPhone can stop a page there. Keep Safari open on this page with the screen on until it finishes.');
+  else if (f.unloaded) lines.push('The page was closed or reloaded' + (f.hiddenCount ? ' (it had also been in the background ' + f.hiddenCount + '× during the run)' : '') + ' — by you, or by Safari. If you did not do it, Safari probably ran out of memory.');
+  else if (f.hiddenCount) lines.push('The page had been in the background ' + f.hiddenCount + '× during the run, and then stopped without warning (Safari most likely ran out of memory).');
+  else lines.push('The page was in front and stopped without warning, so Safari most likely ran out of memory. Close other apps and tabs and try again.');
+  const ck = ckptStore.load(); const saved = ck && ck.results ? Object.keys(ck.results).length : 0;
+  if (saved) lines.push(saved + ' speech part(s) were saved. Choose the same video again with the same settings and tap Find highlights — those parts are reused, so it continues instead of starting over.');
+  else lines.push('Nothing was saved yet. Choose your video again and tap Find highlights.');
+  if (f.start !== undefined && !$('#startSec').value) { /* defaults stay */ }
+  const b = $('#crashBanner'); b.classList.remove('hidden');
+  banner(b, 'bad', 'The previous run did not finish', lines.join('\n'));
+  const smaller = f.model && /base/.test(f.model) ? f.model.replace('base', 'tiny') : null;
+  b.insertAdjacentHTML('beforeend', '<div>' + (smaller && MODELS[smaller] ? '<button class="btn small" id="btnSmaller">Use the smaller model (starts over)</button>' : '') + '<button class="btn small" id="btnDismiss">Dismiss</button></div>');
+  const bs = $('#btnSmaller'); if (bs) bs.addEventListener('click', () => { $('#model').value = smaller; bs.remove(); });
+  $('#btnDismiss').addEventListener('click', () => { b.classList.add('hidden'); ckptStore.clear(); });
+  if (f.start !== undefined) { $('#startSec').value = String(f.start); }
+  if (f.len !== undefined) { $('#lenSec').value = String(f.len); }
+  if (f.model && MODELS[f.model]) $('#model').value = f.model;
+}
 function boot() {
   buildSteps();
   $('#model').innerHTML = Object.entries(MODELS).map(([k, v]) => '<option value="' + k + '"' + (k === 'base.en' ? ' selected' : '') + '>' + esc(v.label) + '</option>').join('');
@@ -441,12 +531,14 @@ function boot() {
     setTimeout(() => { $('#btnCopy').textContent = 'Copy report'; }, 2500);
   });
   document.querySelectorAll('input[name=mine]').forEach((r) => r.addEventListener('change', () => { if (run && !st.running) buildReport(run.ok, run.err); }));
-  const flag = readFlag();
-  if (flag) {
-    clearFlag();
-    const b = $('#crashBanner'); b.classList.remove('hidden');
-    banner(b, 'bad', 'The previous run did not finish', 'It stopped during “' + ((STEPS.find((s) => s[0] === flag.step) || [])[1] || flag.step) + '”. Safari probably closed or reloaded the tab (usually a memory limit). Tell Claude which step this says.');
-  }
+  document.addEventListener('visibilitychange', onVisibility);
+  // a normal reload/close also fires "hidden" right before pagehide: do not mistake that for the app being backgrounded
+  window.addEventListener('pagehide', () => {
+    if (!st.running) return;
+    const own = flag.hiddenSince && Date.now() - flag.hiddenSince < 300;
+    patchFlag(Object.assign({ unloaded: true }, own ? { hiddenNow: false, hiddenSince: null, hiddenCount: Math.max(0, (flag.hiddenCount || 0) - 1) } : {}));
+  });
+  showRecovery();
   window.__highlightsTest = { get run() { return run; } };
 }
 boot();

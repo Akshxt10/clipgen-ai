@@ -30,6 +30,18 @@ execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=320x180:
 const noAudio = join(work, 'noaudio.webm');
 execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=320x180:r=15:d=10', '-an', '-c:v', 'libvpx', '-b:v', '100k', '-deadline', 'realtime', '-cpu-used', '8', '-y', noAudio]);
 
+// Plan of the 150 s source, computed the same way the page does (same audio, same code), so the stand-in recognizer
+// can tell which part of the recording it is being asked about — also after a resume.
+import { planChunks } from '../asr-chunks.js';
+import { loudnessFromPcm } from '../loudness.js';
+const rawPcm = execFileSync('ffmpeg', ['-v', 'error', '-ss', '0', '-i', src, '-t', '150', '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-f', 'f32le', '-'], { maxBuffer: 1 << 28 });
+const PCM = new Float32Array(rawPcm.buffer.slice(rawPcm.byteOffset, rawPcm.byteOffset + rawPcm.byteLength - (rawPcm.byteLength % 4)));
+const PLAN = planChunks(loudnessFromPcm(PCM, 16000, 0.25), PCM.length / 16000);
+// a part is identified by its length AND a fingerprint of its first samples
+const fp = (a) => { let t = 0; for (let i = 0; i < 256 && i < a.length; i++) t += a[i] * (i + 1); return a.length + ':' + t.toFixed(6); };
+const PLAN_FPS = PLAN.map((p) => fp(PCM.subarray(Math.round(p.s * 16000), Math.round(p.e * 16000))));
+if (new Set(PLAN_FPS).size !== PLAN_FPS.length) throw new Error('test fixture: parts must be identifiable');
+
 const server = http.createServer((req, res) => {
   const p = join(root, decodeURIComponent(req.url.split('?')[0]).replace(/\/$/, '/index.html'));
   if (!p.startsWith(root) || !existsSync(p) || statSync(p).isDirectory()) { res.writeHead(404); return res.end('nf'); }
@@ -65,7 +77,8 @@ async function newPage(ctx, { recognizer, source }) {
   }));
   await page.exposeFunction('__nWrite', (name, b64) => { const f = join(wd, name.replace(/^\//, '')); mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, Buffer.from(b64, 'base64')); });
   await page.exposeFunction('__nRead', (name) => readFileSync(join(wd, name.replace(/^\//, ''))).toString('base64'));
-  await page.addInitScript(({ useRecognizer, fixture }) => {
+  await page.addInitScript(({ useRecognizer, fixture, planFps, planStarts }) => {
+    window.__events = [];
     const b64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 8192) s += String.fromCharCode.apply(null, u8.subarray(i, i + 8192)); return btoa(s); };
     const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
     window.__CLIPGEN_TEST__ = {
@@ -74,14 +87,38 @@ async function newPage(ctx, { recognizer, source }) {
         exec: async (args) => { const r = await window.__nExec(args); r.lines.forEach((l) => hooks.onLog(l)); return r.code; },
         writeFile: async (n, d) => window.__nWrite(n, b64(d)),
         readFile: async (n) => unb64(await window.__nRead(n)),
-        deleteFile: async () => {}, mkdir: async () => {}, mount: async () => {}, unmount: async () => {}, memInfo: async () => 0, terminate: () => {}
+        deleteFile: async () => {}, mkdir: async () => {}, mount: async () => {}, unmount: async () => {}, memInfo: async () => 0, terminate: () => { window.__events.push('terminate'); }
       }) }
     };
-    if (useRecognizer === 'fixture') window.__CLIPGEN_TEST__.recognize = async () => ({ text: 'FIXTURE', chunks: fixture });
+    // part-aware fixture recognizer: returns the fixture words that start inside the part it is given, on the part's local clock
+    const part = (audio) => {
+      let t = 0; for (let i = 0; i < 256 && i < audio.length; i++) t += audio[i] * (i + 1);
+      const idx = planFps.indexOf(audio.length + ':' + t.toFixed(6));
+      if (idx < 0) throw new Error('unexpected part ' + audio.length + ' samples');
+      const off = planStarts[idx], len = audio.length / 16000;
+      window.__events.push('rec:' + idx + ':' + len.toFixed(2));
+      const chunks = fixture.filter((c) => c.timestamp[0] >= off - 1e-9 && c.timestamp[0] < off + len).map((c) => ({ text: c.text, timestamp: [+(c.timestamp[0] - off).toFixed(3), +(Math.min(c.timestamp[1], off + len) - off).toFixed(3)] }));
+      return { idx, chunks };
+    };
+    const calls = () => window.__events.filter((e) => e.startsWith('rec:')).length;
+    if (useRecognizer === 'fixture') window.__CLIPGEN_TEST__.recognize = async (audio) => ({ text: 'FIXTURE', chunks: part(audio).chunks });
+    if (useRecognizer.startsWith('killer')) window.__CLIPGEN_TEST__.recognize = async (audio) => {
+      if (calls() === 2 && !sessionStorage.getItem('killed')) {          // the 3rd part: the tab dies (simulated reload)
+        sessionStorage.setItem('killed', '1');
+        if (useRecognizer === 'killer-bg') { Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); document.dispatchEvent(new Event('visibilitychange')); await new Promise((r) => setTimeout(r, 600)); }
+        if (useRecognizer === 'killer-hard') { Storage.prototype.setItem = function () {}; }   // a real kill runs no code at all: nothing more is written
+        location.reload(); await new Promise(() => {});
+      }
+      return { text: 'FIXTURE', chunks: part(audio).chunks };
+    };
+    if (useRecognizer === 'flaky') window.__CLIPGEN_TEST__.recognize = async (audio) => {
+      if (calls() === 2 && !window.__flaked) { window.__flaked = true; throw new Error('The speech worker crashed: out of memory'); }
+      return { text: 'FIXTURE', chunks: part(audio).chunks };
+    };
     if (useRecognizer === 'short') window.__CLIPGEN_TEST__.recognize = async () => ({ text: 'FIXTURE', chunks: 'hello everyone this is a quick test of the new caption feature and it works well on my phone'.split(' ').map((w, i) => ({ text: ' ' + w, timestamp: [0.5 + i * 0.5, 0.5 + i * 0.5 + 0.42] })) });
     if (useRecognizer === 'dangling') window.__CLIPGEN_TEST__.recognize = async () => ({ text: 'FIXTURE', chunks: 'so we talked about the ads and how people react to the ad and then I said well you know it is just the way that the market works when you put the ad-'.split(' ').map((w, i) => ({ text: ' ' + w, timestamp: [0.5 + i * 0.3, 0.5 + i * 0.3 + 0.26] })) });
     if (useRecognizer === 'empty') window.__CLIPGEN_TEST__.recognize = async () => ({ text: '', chunks: [] });
-  }, { useRecognizer: recognizer, fixture: FIXTURE });
+  }, { useRecognizer: recognizer, fixture: FIXTURE, planFps: PLAN_FPS, planStarts: PLAN.map((p) => p.s) });
   await page.goto(base + 'index.html');
   return { page, errors };
 }
@@ -185,6 +222,104 @@ test('a clip cut mid-sentence is shown with a visible warning, not presented as 
   assert.match(verdict, /⚠ warning/);
   assert.ok(!/Starts and ends cleanly/.test(card));
   assert.match(await page.inputValue('#report'), /CAVEATS: May end mid-sentence/);
+  await ctx.close();
+});
+
+const CKPT = 'clipgen-highlights-ckpt';
+const fixtureAbs = FIXTURE.map((c) => c.timestamp[0]);
+const wordStarts = (page) => page.evaluate(() => window.__highlightsTest.run.words.map((w) => w.s));
+
+test('memory: the video engine is released BEFORE speech recognition, and recognition runs in parts of at most 27 s with exact timing', async () => {
+  const ctx = await browser.newContext();
+  const { page } = await newPage(ctx, { recognizer: 'fixture' });
+  await runIt(page, src);
+  const ev = await page.evaluate(() => window.__events);
+  const firstRec = ev.findIndex((e) => e.startsWith('rec:')), term = ev.indexOf('terminate');
+  assert.ok(term >= 0 && term < firstRec, 'engine terminated (' + term + ') before the first recognition (' + firstRec + '): ' + ev.slice(0, 4));
+  const lens = ev.filter((e) => e.startsWith('rec:')).map((e) => Number(e.split(':')[2]));
+  assert.equal(lens.length, PLAN.length);
+  assert.ok(PLAN.length >= 6, 'a 150 s recording is split into several parts: ' + PLAN.length);
+  assert.ok(lens.every((l) => l <= 27.01), 'part lengths ' + lens);
+  const starts = await wordStarts(page);
+  assert.equal(starts.length, FIXTURE.length, 'no word lost or duplicated at part borders');
+  starts.forEach((t, i) => assert.ok(Math.abs(t - fixtureAbs[i]) < 0.02, 'word ' + i + ': ' + t + ' vs ' + fixtureAbs[i]));
+  const rep = await page.inputValue('#report');
+  assert.match(rep, /VIDEO ENGINE RELEASED BEFORE SPEECH: yes/);
+  assert.match(rep, new RegExp('ASR PARTS: ' + PLAN.length + ' \\(reused 0'));
+  assert.equal(await page.evaluate((k) => localStorage.getItem(k), CKPT), null, 'checkpoint removed after a successful run');
+  await ctx.close();
+});
+
+for (const variant of ['killer-hard', 'killer-reload', 'killer-bg']) {
+  test('tab killed mid-recognition (' + variant + '): clear recovery message on reload, retry continues from the saved parts', async () => {
+    const ctx = await browser.newContext();
+    const { page } = await newPage(ctx, { recognizer: variant });
+    await page.setInputFiles('#file', src);
+    for (const [k, v] of Object.entries({ startSec: 0, lenSec: 150, numClips: 3, minLen: 15, maxLen: 35 })) await page.fill('#' + k, String(v));
+    await page.click('#btnRun');
+    await page.waitForSelector('#crashBanner:not(.hidden)', { timeout: 60000 });          // appears after the simulated kill + reload
+    const b = (await page.textContent('#crashBanner')).replace(/\s+/g, ' ');
+    console.log(variant.toUpperCase(), 'BANNER:', b);
+    assert.match(b, /The previous run did not finish/);
+    assert.match(b, /Recognize your speech/);
+    assert.match(b, /speech part 3 of \d+/);
+    assert.match(b, /2 speech part\(s\) were saved/);
+    assert.match(b, /same video again/);
+    if (variant === 'killer-bg') assert.match(b, /background or the phone was locked/);
+    else if (variant === 'killer-reload') { assert.match(b, /closed or reloaded/); assert.ok(!/background/.test(b), 'a plain reload is not blamed on the background'); }
+    else { assert.match(b, /stopped without warning, so Safari most likely ran out of memory/); assert.ok(!/background/.test(b)); }
+    assert.equal(await page.inputValue('#lenSec'), '150', 'your settings are put back');
+    assert.equal(await page.isVisible('#btnSmaller'), true, 'offers the smaller model');
+    assert.equal(await page.evaluate(() => localStorage.getItem('clipgen-highlights-run')), null, 'no stale flag is left behind');
+    // retry: pick the same file again, same settings
+    await page.setInputFiles('#file', src);
+    await page.fill('#lenSec', '150');
+    await page.click('#btnRun');
+    await page.waitForSelector('#resultCard:not(.hidden)', { timeout: 120000 });
+    assert.equal(await page.isVisible('#crashBanner'), false, 'banner is gone once a new run starts');
+    const ev = await page.evaluate(() => window.__events.filter((e) => e.startsWith('rec:')));
+    assert.equal(ev.length, PLAN.length - 2, 'only the unfinished parts were recognized after the retry');
+    assert.equal(ev[0].split(':')[1], '2');
+    const starts = await wordStarts(page);
+    assert.equal(starts.length, FIXTURE.length);
+    starts.forEach((t, i) => assert.ok(Math.abs(t - fixtureAbs[i]) < 0.02));
+    assert.match(await page.textContent('#verdict'), /highlight\(s\) found/);
+    assert.match(await page.inputValue('#report'), /ASR PARTS: \d+ \(reused 2/);
+    assert.equal(await page.evaluate((k) => localStorage.getItem(k), CKPT), null);
+    await ctx.close();
+  });
+}
+
+test('recognizer crash (no reload): the page says what was saved, and Retry continues', async () => {
+  const ctx = await browser.newContext();
+  const { page } = await newPage(ctx, { recognizer: 'flaky' });
+  await runIt(page, src);
+  const verdict = (await page.textContent('#verdict')).replace(/\s+/g, ' ');
+  console.log('CRASH VERDICT:', verdict.slice(0, 360));
+  assert.match(verdict, /NOT FINISHED/);
+  assert.match(verdict, /speech worker crashed/);
+  assert.match(verdict, new RegExp('Nothing is lost: 2 of ' + PLAN.length + ' speech parts were saved'));
+  assert.match(await page.inputValue('#report'), /ASR FAILURE: stopped in part 3 of \d+ · parts saved 2/);
+  assert.equal(await page.isVisible('#btnRun'), true);
+  assert.equal(await page.isVisible('#btnCancel'), false, 'no stale "running" state');
+  assert.equal(await page.evaluate(() => localStorage.getItem('clipgen-highlights-run')), null, 'a handled error leaves no crash flag');
+  await page.click('#btnRun');
+  await page.waitForFunction(() => window.__highlightsTest.run.ok === true, null, { timeout: 120000 });
+  const after = await page.evaluate(() => window.__events.filter((e) => e.startsWith('rec:')).length);
+  assert.equal(after, PLAN.length, 'parts 0–1 first time (the failed attempt logs nothing), then parts 2…end after Retry: ' + after);
+  const starts = await wordStarts(page);
+  assert.equal(starts.length, FIXTURE.length);
+  await ctx.close();
+});
+
+test('a leftover checkpoint from another video is never mixed into this run', async () => {
+  const ctx = await browser.newContext();
+  const { page } = await newPage(ctx, { recognizer: 'fixture' });
+  await page.evaluate((k) => localStorage.setItem(k, JSON.stringify({ key: 'some-other-video#0#150#base.en#0-20', savedAt: Date.now(), results: { 0: { text: ' STALE', ms: 1, timing: 'word', chunks: [{ text: ' STALE', timestamp: [1, 2] }] } } })), CKPT);
+  await runIt(page, src);
+  const words = await page.evaluate(() => window.__highlightsTest.run.words.map((w) => w.w));
+  assert.ok(!words.includes('STALE'));
+  assert.equal(await page.evaluate(() => window.__events.filter((e) => e.startsWith('rec:')).length), PLAN.length);
   await ctx.close();
 });
 
