@@ -32,6 +32,13 @@ no scene detection had run. Fixes in `analyze.js` (shared with `backend/src/anal
 - **Hard limits.** Clips always stay inside the video, within your shortest/longest length (padding can no longer push past the maximum),
   and never overlap (the "More clips" setting used to allow 10% overlap; it no longer does).
 
+## Fewer clips than requested (after the second iPhone run)
+Run on IMG_4714.mov (45 s narration) returned 1 clip for "3 clips": only one moment scored above the cutoff, and the page did not say so.
+Now: the results say "N of M requested clips scored above the cutoff", and next-best moments from a more permissive pass are listed after them,
+labelled **weaker** (never overlapping the strong ones). If none exist it says why and what to try.
+Correction: the "…ad -" ending seen in the first test report was the REPORT cutting each clip's text at 140 characters, not necessarily a real
+clip boundary. The report now carries the full clip text. (The mid-sentence protections from the quality pass are still real and tested.)
+
 ## Memory safety and crash recovery (after a real-iPhone run stopped during “Recognize your speech”)
 The cause on that phone is NOT confirmed (the sandbox cannot see iPhone memory). Two likely contributors were removed, and recovery was added:
 - The video engine stays loaded while Whisper loads → it is now released right after the audio is extracted.

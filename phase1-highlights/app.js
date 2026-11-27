@@ -286,16 +286,26 @@ async function stepAnalyze() {
     res = analyzeVideo(Object.assign({ settings: at.settings }, input));
     if (res.clips.length) { if (at.label) { run.lowConfidence = true; run.relaxed = at.label; run.settings = at.settings; } break; }
   }
+  // Fewer clips than requested? Say so, and offer the next-best moments from a more permissive pass, clearly labelled weaker.
+  run.weak = [];
+  const want = run.opts.numClips;
+  if (res.clips.length && res.clips.length < want && run.settings.intensity !== 'aggressive') {
+    const more = analyzeVideo(Object.assign({ settings: Object.assign({}, run.settings, { intensity: 'aggressive', numClips: want }) }, input));
+    const picks = more.clips.filter((c) => res.clips.every((h) => c.end <= h.start - 1 || c.start >= h.end + 1)).slice(0, want - res.clips.length);
+    run.weak = picks.map((c, k) => Object.assign({}, c, { weak: true, id: 'w' + (k + 1), rank: res.clips.length + k + 1 }));
+  }
+  run.shortfall = res.clips.length < want ? { found: res.clips.length, weak: run.weak.length, asked: want } : null;
   run.analysis = res;
   run.clips = res.clips;
-  run.rec.analysis = { mode: res.mode, clips: res.clips.length, lowConfidence: run.lowConfidence, relaxed: run.relaxed, stats: res.stats, settings: run.settings };
+  run.all = res.clips.concat(run.weak);
+  run.rec.analysis = { weakClips: run.weak.length, asked: want, mode: res.mode, clips: res.clips.length, lowConfidence: run.lowConfidence, relaxed: run.relaxed, stats: res.stats, settings: run.settings };
   if (!res.clips.length) return { status: 'warn', note: '! no moment qualified as a highlight (' + (res.stats.note || 'scores were below the threshold even on “More clips”') + ')' };
   const notes = [res.clips.length + ' clip(s) · mode: ' + (res.mode === 'transcript' ? 'speech + loudness' : 'loudness only (no usable transcript)')];
   if (run.lowConfidence) notes.push('! nothing qualified with your settings, so I relaxed them: ' + run.relaxed);
   return { status: (run.lowConfidence || res.mode !== 'transcript') ? 'warn' : 'ok', note: notes.join('\n') };
 }
 async function stepVerify() {
-  const chk = run.check = checkClips(run.clips, run.words, run.dur);
+  const chk = run.check = checkClips(run.all, run.words, run.dur);
   run.sync = syncCheck(run.pcm, RATE, run.words);
   run.rec.checks = { clipChecks: chk, sync: run.sync };
   const notes = [];
@@ -311,7 +321,7 @@ function drawWave() {
   ctx.clearRect(0, 0, W, H);
   const lo = -70, hi = Math.max(-10, Math.max.apply(null, v));
   const cols = ['#8b7bff', '#2fd4f0', '#38d39f', '#ffc857', '#ff8fb1', '#9ad0ff'];
-  run.clips.forEach((c, k) => { ctx.fillStyle = cols[k % cols.length] + '44'; ctx.fillRect((c.start / run.dur) * W, 0, ((c.end - c.start) / run.dur) * W, H); });
+  run.all.forEach((c, k) => { ctx.fillStyle = cols[k % cols.length] + '44'; ctx.fillRect((c.start / run.dur) * W, 0, ((c.end - c.start) / run.dur) * W, H); });
   ctx.fillStyle = '#c9cfe6';
   for (let x = 0; x < W; x++) {
     const a = Math.floor((x / W) * n), b = Math.max(a + 1, Math.floor(((x + 1) / W) * n));
@@ -322,9 +332,10 @@ function drawWave() {
 }
 function renderClips() {
   const cols = ['#8b7bff', '#2fd4f0', '#38d39f', '#ffc857', '#ff8fb1', '#9ad0ff'];
-  $('#clips').innerHTML = run.clips.map((c, k) =>
+  const head = (run.shortfall ? '<p class="note"><b>' + run.shortfall.found + ' of ' + run.shortfall.asked + ' requested clips</b> scored above the cutoff for a real highlight in this part of the video' + (run.weak.length ? '. ' + run.weak.length + ' weaker moment(s) from a more permissive pass are listed after them, labelled “weaker”.' : ', and no other non-overlapping moment of the requested length was available. Try “More clips”, a longer part of the video, or a shorter minimum clip length.') + '</p>' : '');
+  $('#clips').innerHTML = head + run.all.map((c, k) =>
     '<div class="clip" style="border-left:4px solid ' + cols[k % cols.length] + '">' +
-      '<div class="top"><span class="ti">#' + c.rank + ' · ' + esc(c.title) + '</span><span class="sc">' + Math.round(c.score) + '</span></div>' +
+      '<div class="top"><span class="ti">#' + c.rank + (c.weak ? ' (weaker) ' : '') + ' · ' + esc(c.title) + '</span><span class="sc">' + Math.round(c.score) + '</span></div>' +
       '<div class="note" style="margin:0">' + clock(c.start + run.opts.start) + ' – ' + clock(c.end + run.opts.start) + ' in your video · ' + c.duration.toFixed(1) + ' s · highlight score (heuristic)</div>' +
       '<div>' + c.categories.map((t) => '<span class="tag">' + esc(t) + '</span>').join('') + '</div>' +
       '<ul>' + c.reasons.map((r) => '<li>' + esc(r) + '</li>').join('') + '</ul>' +
@@ -336,7 +347,7 @@ function renderClips() {
 }
 let stopAt = null;
 function playClip(k) {
-  const c = run.clips[k]; if (!c) return;
+  const c = run.all[k]; if (!c) return;
   const vid = $('#vid');
   if (!st.videoUrl) { st.videoUrl = URL.createObjectURL(run.opts.file); st.urls.push(st.videoUrl); }
   const t0 = run.opts.start + c.start; stopAt = run.opts.start + c.end;
@@ -355,8 +366,8 @@ function verdictFor(ok, err) {
   const warned = run.clips.filter((c) => c.caveats && c.caveats.length).length;
   if (warned) issues.push(warned + ' of the clips carry a ⚠ warning (possible mid-sentence cut or unreliable transcript) — see the cards.');
   if (run.sync && run.sync.onSpeech !== null && run.sync.onSpeech < 0.6) issues.push('Only ' + Math.round(run.sync.onSpeech * 100) + '% of word times line up with audible sound.');
-  if (issues.length) return { kind: 'warn', title: run.clips.length + ' highlight(s) found, with caveats', body: issues.join('\n') + '\nScores are heuristics — preview each clip and judge it yourself.' };
-  return { kind: 'ok', title: run.clips.length + ' highlight(s) found', body: 'Automatic checks passed (clips are well-formed and cut between words). Whether they are GOOD highlights is your call — preview them and answer the box below.' };
+  if (issues.length) return { kind: 'warn', title: run.clips.length + (run.shortfall ? ' of ' + run.shortfall.asked : '') + ' highlight(s) found, with caveats', body: issues.join('\n') + '\nScores are heuristics — preview each clip and judge it yourself.' };
+  return { kind: 'ok', title: run.clips.length + (run.shortfall ? ' of ' + run.shortfall.asked : '') + ' highlight(s) found' + (run.weak.length ? ' (+' + run.weak.length + ' weaker)' : ''), body: 'Automatic checks passed (clips are well-formed and cut between words). Whether they are GOOD highlights is your call — preview them and answer the box below.' };
 }
 function showResult(ok, errMsg) {
   $('#resultCard').classList.remove('hidden');
@@ -393,7 +404,8 @@ function buildReport(ok, errMsg) {
   if (run.words && run.words.length) L.push('TRANSCRIPT: ' + run.words.map((x) => x.w).join(' ').slice(0, 1200));
   if (r.analysis) L.push('ANALYSIS: mode=' + r.analysis.mode + ' lowConfidence=' + r.analysis.lowConfidence + ' stats=' + JSON.stringify(r.analysis.stats));
   L.push('SCENE DETECTION: not run (analysis stats scenes=' + (run.rec.analysis ? run.rec.analysis.stats.scenes : 'n/a') + '); per-word recognizer confidence: not provided by this recognizer');
-  if (run.clips) for (const c of run.clips) L.push('CLIP #' + c.rank + ' ' + c.start.toFixed(1) + '–' + c.end.toFixed(1) + ' s (video ' + clock(c.start + run.opts.start) + '–' + clock(c.end + run.opts.start) + ') score ' + c.score + ' [' + c.categories.join(', ') + '] “' + (c.transcript || '').slice(0, 140) + '” reasons: ' + c.reasons.join(' | ') + (c.caveats && c.caveats.length ? ' CAVEATS: ' + c.caveats.join(' | ') : '') + ' reliability=' + (c.signals.reliability !== undefined ? c.signals.reliability : 'n/a'));
+  if (run.shortfall) L.push('SHORTFALL: asked ' + run.shortfall.asked + ', ' + run.shortfall.found + ' above the cutoff, ' + run.shortfall.weak + ' weaker shown');
+  if (run.all) for (const c of run.all) L.push((c.weak ? 'WEAKER CLIP #' : 'CLIP #') + c.rank + ' ' + c.start.toFixed(1) + '–' + c.end.toFixed(1) + ' s (video ' + clock(c.start + run.opts.start) + '–' + clock(c.end + run.opts.start) + ') score ' + c.score + ' [' + c.categories.join(', ') + '] FULL TEXT: “' + (c.transcript || '') + '” reasons: ' + c.reasons.join(' | ') + (c.caveats && c.caveats.length ? ' CAVEATS: ' + c.caveats.join(' | ') : '') + ' reliability=' + (c.signals.reliability !== undefined ? c.signals.reliability : 'n/a'));
   if (r.checks) L.push('CHECKS: ' + JSON.stringify({ ok: r.checks.clipChecks.ok, problems: r.checks.clipChecks.problems, sync: r.checks.sync }));
   L.push('MEMORY: ' + (run.mem.length ? run.mem.map((m) => m.tag + ' wasm=' + (m.wasmMB || 'n/a')).join(' | ') : 'n/a'));
   L.push('STEP TIMES (ms): ' + JSON.stringify(run.timing));
@@ -455,6 +467,7 @@ async function start() {
   $('#btnRun').classList.remove('hidden'); $('#btnCancel').classList.add('hidden');
   paint();
   showResult(ok, errMsg);
+  try { $('#resultCard').scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch (_) { /* ignore */ }
   try { if (st.engine) st.engine.terminate(); } catch (_) { /* ignore */ }
   st.engine = null;
 }
@@ -474,7 +487,7 @@ function readDuration(file) {
     st.videoDuration = Number.isFinite(v.duration) ? +v.duration.toFixed(1) : null;
     if (st.videoDuration) {
       $('#fileInfo').textContent = file.name + ' · ' + mb(file.size) + ' · ' + clock(st.videoDuration) + ' long';
-      $('#lenSec').value = String(Math.min(Math.floor(st.videoDuration), 60));
+      if (!st.lenTouched) $('#lenSec').value = String(Math.min(Math.floor(st.videoDuration), 60));      // never overwrite a length you typed or that a recovery restored (resume needs identical settings)
     }
     done();
   };
@@ -514,13 +527,14 @@ function showRecovery() {
   const bs = $('#btnSmaller'); if (bs) bs.addEventListener('click', () => { $('#model').value = smaller; bs.remove(); });
   $('#btnDismiss').addEventListener('click', () => { b.classList.add('hidden'); ckptStore.clear(); });
   if (f.start !== undefined) { $('#startSec').value = String(f.start); }
-  if (f.len !== undefined) { $('#lenSec').value = String(f.len); }
+  if (f.len !== undefined) { $('#lenSec').value = String(f.len); st.lenTouched = true; }
   if (f.model && MODELS[f.model]) $('#model').value = f.model;
 }
 function boot() {
   buildSteps();
   $('#model').innerHTML = Object.entries(MODELS).map(([k, v]) => '<option value="' + k + '"' + (k === 'base.en' ? ' selected' : '') + '>' + esc(v.label) + '</option>').join('');
   $('#file').addEventListener('change', () => { const f = $('#file').files[0]; $('#btnRun').disabled = !f; if (f) readDuration(f); });
+  $('#lenSec').addEventListener('input', () => { st.lenTouched = true; });
   $('#btnRun').addEventListener('click', start);
   $('#btnCancel').addEventListener('click', cancel);
   $('#vid').addEventListener('timeupdate', () => { const v = $('#vid'); if (stopAt !== null && v.currentTime >= stopAt) { v.pause(); stopAt = null; } });

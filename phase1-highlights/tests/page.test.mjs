@@ -27,6 +27,12 @@ const silent = join(work, 'silent.webm');
 execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=320x180:r=15:d=30', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono', '-t', '30', '-c:v', 'libvpx', '-b:v', '100k', '-deadline', 'realtime', '-cpu-used', '8', '-c:a', 'libopus', '-y', silent]);
 const short = join(work, 'short.webm');
 execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=320x180:r=15:d=12', '-f', 'lavfi', '-i', 'aevalsrc=0.004*sin(2*PI*50*t)+0.2*sin(2*PI*300*t)*between(t\\,0.4\\,10):s=44100:d=12', '-c:v', 'libvpx', '-b:v', '100k', '-deadline', 'realtime', '-cpu-used', '8', '-c:a', 'libopus', '-y', short]);
+// The words below are the transcript Whisper base.en actually produced on the user's iPhone (report highlights-v2, IMG_4714.mov).
+// The word TIMES are approximated (the report has none); the audio is a stand-in tone under each word.
+const REAL_TEXT = "Today I am going to start this chapter on the face of it. So let's start. Mr. Lam's garden, there is the occasional sound of bird song, ad -op, tree, living, wrestling. There is footsteps are heard as he walks slowly and tentatively through the long grass. He pauses then walks. So, again he comes around a screen of bushes so that Mr. Lam speaks to him. He is close and can end their history. That's all for today. Thank you. Bye.";
+const REAL_WORDS = (() => { let t = 0.6; const w = REAL_TEXT.split(/\s+/).map((x) => { const d = 0.3 + 0.03 * x.length; const o = { text: ' ' + x, s: t, e: t + d }; t += d + 0.08 + (/[.!?]$/.test(x) ? 0.7 : 0); return o; }); const k = 44 / w[w.length - 1].e; return w.map((o) => ({ text: o.text, timestamp: [+(o.s * k).toFixed(2), +(o.e * k).toFixed(2)] })); })();
+const reportSrc = join(work, 'report.webm');
+execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=320x180:r=15:d=45', '-f', 'lavfi', '-i', 'aevalsrc=0.001*sin(2*PI*50*t)+0.12*sin(2*PI*300*t)*(' + REAL_WORDS.map((w) => 'between(t\\,' + w.timestamp[0] + '\\,' + w.timestamp[1] + ')').join('+') + '):s=44100:d=45', '-c:v', 'libvpx', '-b:v', '100k', '-deadline', 'realtime', '-cpu-used', '8', '-c:a', 'libopus', '-y', reportSrc]);
 const noAudio = join(work, 'noaudio.webm');
 execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=320x180:r=15:d=10', '-an', '-c:v', 'libvpx', '-b:v', '100k', '-deadline', 'realtime', '-cpu-used', '8', '-y', noAudio]);
 
@@ -117,8 +123,15 @@ async function newPage(ctx, { recognizer, source }) {
     };
     if (useRecognizer === 'short') window.__CLIPGEN_TEST__.recognize = async () => ({ text: 'FIXTURE', chunks: 'hello everyone this is a quick test of the new caption feature and it works well on my phone'.split(' ').map((w, i) => ({ text: ' ' + w, timestamp: [0.5 + i * 0.5, 0.5 + i * 0.5 + 0.42] })) });
     if (useRecognizer === 'dangling') window.__CLIPGEN_TEST__.recognize = async () => ({ text: 'FIXTURE', chunks: 'so we talked about the ads and how people react to the ad and then I said well you know it is just the way that the market works when you put the ad-'.split(' ').map((w, i) => ({ text: ' ' + w, timestamp: [0.5 + i * 0.3, 0.5 + i * 0.3 + 0.26] })) });
+    if (useRecognizer === 'report') {            // sequential parts from the start (no resume in this test): the cursor gives each part's offset
+      let cursor = 0;
+      window.__CLIPGEN_TEST__.recognize = async (audio) => {
+        const off = cursor, len = audio.length / 16000; cursor += len;
+        return { text: 'FIXTURE', chunks: fixture.filter((c) => c.timestamp[0] >= off - 1e-9 && c.timestamp[0] < off + len).map((c) => ({ text: c.text, timestamp: [+(c.timestamp[0] - off).toFixed(3), +(Math.min(c.timestamp[1], off + len) - off).toFixed(3)] })) };
+      };
+    }
     if (useRecognizer === 'empty') window.__CLIPGEN_TEST__.recognize = async () => ({ text: '', chunks: [] });
-  }, { useRecognizer: recognizer, fixture: FIXTURE, planFps: PLAN_FPS, planStarts: PLAN.map((p) => p.s) });
+  }, { useRecognizer: recognizer, fixture: recognizer === 'report' ? REAL_WORDS : FIXTURE, planFps: PLAN_FPS, planStarts: PLAN.map((p) => p.s) });
   await page.goto(base + 'index.html');
   return { page, errors };
 }
@@ -273,11 +286,13 @@ for (const variant of ['killer-hard', 'killer-reload', 'killer-bg']) {
     assert.equal(await page.evaluate(() => localStorage.getItem('clipgen-highlights-run')), null, 'no stale flag is left behind');
     // retry: pick the same file again, same settings
     await page.setInputFiles('#file', src);
-    await page.fill('#lenSec', '150');
+    await page.waitForFunction(() => /long/.test(document.querySelector('#fileInfo').textContent), null, { timeout: 15000 });   // video length has been read
+    assert.equal(await page.inputValue('#lenSec'), '150', 'choosing the file again must not overwrite the restored length');
     await page.click('#btnRun');
     await page.waitForSelector('#resultCard:not(.hidden)', { timeout: 120000 });
     assert.equal(await page.isVisible('#crashBanner'), false, 'banner is gone once a new run starts');
     const ev = await page.evaluate(() => window.__events.filter((e) => e.startsWith('rec:')));
+    if (ev.length !== PLAN.length - 2) console.log('DEBUG', variant, JSON.stringify(ev), (await page.textContent('#verdict')).slice(0, 300));
     assert.equal(ev.length, PLAN.length - 2, 'only the unfinished parts were recognized after the retry');
     assert.equal(ev[0].split(':')[1], '2');
     const starts = await wordStarts(page);
@@ -320,6 +335,30 @@ test('a leftover checkpoint from another video is never mixed into this run', as
   const words = await page.evaluate(() => window.__highlightsTest.run.words.map((w) => w.w));
   assert.ok(!words.includes('STALE'));
   assert.equal(await page.evaluate(() => window.__events.filter((e) => e.startsWith('rec:')).length), PLAN.length);
+  await ctx.close();
+});
+
+test('real iPhone transcript (45 s narration): fewer strong moments than requested → the page explains it, shows labelled weaker moments, and the report has the FULL clip text', async () => {
+  const ctx = await browser.newContext({ viewport: { width: 393, height: 852 } });
+  const { page } = await newPage(ctx, { recognizer: 'report', source: reportSrc });
+  await runIt(page, reportSrc, { lenSec: 45, minLen: 10, maxLen: 30, numClips: 3 });
+  const verdict = (await page.textContent('#verdict')).replace(/\s+/g, ' ');
+  const cards = (await page.textContent('#clips')).replace(/\s+/g, ' ');
+  const r = await page.evaluate(() => { const x = window.__highlightsTest.run; return { n: x.clips.length, weak: x.weak.length, all: x.all.length, short: x.shortfall, check: x.check, words: x.words.length, full: x.clips[0].transcript }; });
+  console.log('REAL-TRANSCRIPT VERDICT:', verdict.slice(0, 200), JSON.stringify(r.short));
+  assert.equal(r.words, 82);
+  assert.ok(r.n >= 1 && r.n < 3, 'fewer than requested: ' + r.n);
+  assert.ok(r.weak >= 1, 'weaker moments are offered');
+  assert.equal(r.n + r.weak <= 3, true);
+  assert.equal(r.check.ok, true, JSON.stringify(r.check.problems));
+  assert.match(verdict, new RegExp(r.n + ' of 3 highlight\\(s\\) found \\(\\+' + r.weak + ' weaker\\)'));
+  assert.match(cards, /of 3 requested clips<\/b>|of 3 requested clips/);
+  assert.match(cards, /\(weaker\)/);
+  assert.equal(await page.locator('.clip').count(), r.all);
+  const rep = await page.inputValue('#report');
+  assert.match(rep, /SHORTFALL: asked 3, \d+ above the cutoff, \d+ weaker shown/);
+  assert.ok(rep.includes('FULL TEXT: “' + r.full + '”'), 'the report carries the clip text untruncated, so a cut-off report is never mistaken for a cut-off clip');
+  assert.match(rep, /WEAKER CLIP #/);
   await ctx.close();
 });
 
