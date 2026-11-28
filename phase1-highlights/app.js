@@ -8,6 +8,9 @@
 
   The video engine and the recognizer are imported from ../phase0-speech/ and are NOT modified.
   Scores are heuristics (loudness, speech rate, hook/question/emotion cues, sentence boundaries). They are not human judgement.
+
+  Export (step 2): chosen clips are cut from the original video, made 9:16 (720×1280) with the recognized words burned in, using the
+  same crop/encoder/caption code as the speech-caption test (see export.js). One clip at a time, a fresh video engine per clip.
 */
 import { createEngine } from '../phase0-speech/ffmpeg-engine.js';
 import { createRecognizer, MODELS } from '../phase0-speech/speech.js';
@@ -16,12 +19,14 @@ import { analyzeVideo, normalizeSettings } from './analyze.js';
 import { loudnessFromPcm } from './loudness.js';
 import { checkClips } from './checks.js';
 import { planChunks, checkpointKey, transcribeChunked } from './asr-chunks.js';
+import { clipWindow, buildClipCaptions, exportArgs, parseProbe, judgeOutput, progressFromLog, safeFileName, runExportQueue, captionVisibility, BAND, VF_BASE, OUT_W, OUT_H } from './export.js';
 
-const VERSION = 'highlights-v2';
+const VERSION = 'highlights-v3';
 const FLAG_KEY = 'clipgen-highlights-run';
 const CKPT_KEY = 'clipgen-highlights-ckpt';
 const RATE = 16000;
 const MAX_WINDOW = 600;
+const FONT_URL = '../phase0-speech/font/Poppins-Bold.ttf';      // the caption font of the passed speech-caption export
 
 const STEPS = [
   ['env', 'Check this phone', 2],
@@ -44,7 +49,7 @@ const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const clock = (s) => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 
-const st = { engine: null, rec: null, running: false, urls: [], timer: null, videoDuration: null, videoUrl: null };
+const st = { engine: null, rec: null, running: false, exporting: false, xEngine: null, urls: [], timer: null, videoDuration: null, videoUrl: null };
 let run = null;
 
 /* ---------------- UI ---------------- */
@@ -335,15 +340,19 @@ function renderClips() {
   const head = (run.shortfall ? '<p class="note"><b>' + run.shortfall.found + ' of ' + run.shortfall.asked + ' requested clips</b> scored above the cutoff for a real highlight in this part of the video' + (run.weak.length ? '. ' + run.weak.length + ' weaker moment(s) from a more permissive pass are listed after them, labelled “weaker”.' : ', and no other non-overlapping moment of the requested length was available. Try “More clips”, a longer part of the video, or a shorter minimum clip length.') + '</p>' : '');
   $('#clips').innerHTML = head + run.all.map((c, k) =>
     '<div class="clip" style="border-left:4px solid ' + cols[k % cols.length] + '">' +
+      '<label class="pick"><input type="checkbox" id="pick_' + k + '" data-pick="' + k + '"' + (c.weak ? '' : ' checked') + '> Export this clip</label>' +
       '<div class="top"><span class="ti">#' + c.rank + (c.weak ? ' (weaker) ' : '') + ' · ' + esc(c.title) + '</span><span class="sc">' + Math.round(c.score) + '</span></div>' +
-      '<div class="note" style="margin:0">' + clock(c.start + run.opts.start) + ' – ' + clock(c.end + run.opts.start) + ' in your video · ' + c.duration.toFixed(1) + ' s · highlight score (heuristic)</div>' +
+      '<div class="note" style="margin:0">' + clock(c.start + run.opts.start) + ' – ' + clock(c.end + run.opts.start) + ' in your video (' + (c.start + run.opts.start).toFixed(1) + '–' + (c.end + run.opts.start).toFixed(1) + ' s) · ' + c.duration.toFixed(1) + ' s · highlight score (heuristic)</div>' +
       '<div>' + c.categories.map((t) => '<span class="tag">' + esc(t) + '</span>').join('') + '</div>' +
       '<ul>' + c.reasons.map((r) => '<li>' + esc(r) + '</li>').join('') + '</ul>' +
       (c.caveats && c.caveats.length ? '<ul class="warnl">' + c.caveats.map((r) => '<li>⚠ ' + esc(r) + '</li>').join('') + '</ul>' : '') +
       (c.transcript ? '<div class="tx">“' + esc(c.transcript) + '”</div>' : '<div class="note">No transcript for this clip (loudness only).</div>') +
       '<button class="btn small" data-play="' + k + '">▶ Preview</button>' +
+      '<div class="xstat" id="x_' + k + '"></div>' +
     '</div>').join('');
   document.querySelectorAll('[data-play]').forEach((b) => b.addEventListener('click', () => playClip(Number(b.dataset.play))));
+  document.querySelectorAll('[data-pick]').forEach((b) => b.addEventListener('change', syncExportUi));
+  initExport();
 }
 let stopAt = null;
 function playClip(k) {
@@ -374,7 +383,8 @@ function showResult(ok, errMsg) {
   const v = verdictFor(ok, errMsg);
   banner($('#verdict'), v.kind, v.title, v.body);
   $('#vid').classList.add('hidden');
-  if (ok && run.clips.length) { drawWave(); renderClips(); $('#wave').classList.remove('hidden'); } else { $('#clips').innerHTML = ''; $('#wave').classList.add('hidden'); }
+  if (ok && run.clips.length) { drawWave(); renderClips(); $('#wave').classList.remove('hidden'); }
+  else { $('#clips').innerHTML = ''; $('#wave').classList.add('hidden'); $('#exportBar').classList.add('hidden'); $('#exportCheck').classList.add('hidden'); }
   const m = [];
   const row = (k, val) => m.push('<tr><td>' + esc(k) + '</td><td>' + esc(val) + '</td></tr>');
   if (run.rec.model) row('Speech model', run.rec.model.id + ' · ' + run.rec.model.lib);
@@ -406,6 +416,22 @@ function buildReport(ok, errMsg) {
   L.push('SCENE DETECTION: not run (analysis stats scenes=' + (run.rec.analysis ? run.rec.analysis.stats.scenes : 'n/a') + '); per-word recognizer confidence: not provided by this recognizer');
   if (run.shortfall) L.push('SHORTFALL: asked ' + run.shortfall.asked + ', ' + run.shortfall.found + ' above the cutoff, ' + run.shortfall.weak + ' weaker shown');
   if (run.all) for (const c of run.all) L.push((c.weak ? 'WEAKER CLIP #' : 'CLIP #') + c.rank + ' ' + c.start.toFixed(1) + '–' + c.end.toFixed(1) + ' s (video ' + clock(c.start + run.opts.start) + '–' + clock(c.end + run.opts.start) + ') score ' + c.score + ' [' + c.categories.join(', ') + '] FULL TEXT: “' + (c.transcript || '') + '” reasons: ' + c.reasons.join(' | ') + (c.caveats && c.caveats.length ? ' CAVEATS: ' + c.caveats.join(' | ') : '') + ' reliability=' + (c.signals.reliability !== undefined ? c.signals.reliability : 'n/a'));
+  if (run.exp) {
+    const rows = run.all.map((c) => [c, run.exp.items[c.id]]).filter(([, it]) => it.state !== 'idle');
+    if (rows.length) {
+      const f = run.exp.finished;
+      L.push('EXPORT: ' + rows.length + ' clip(s) tried' + (f ? ' · done ' + f.done + ' · failed ' + f.failed + ' · cancelled ' + f.cancelled + ' · not tried ' + f.skipped + ' · ' + sec(f.ms) : ' · still running') + ' · one clip at a time, a fresh video engine per clip, source mounted not copied');
+      for (const [c, it] of rows) {
+        let t = 'EXPORT CLIP #' + c.rank + ' ' + it.state.toUpperCase();
+        if (it.state === 'done') t += ' · source ' + it.win.absStart + '–' + it.win.absEnd + ' s (' + clock(it.win.absStart) + '–' + clock(it.win.absEnd) + ') · ' + it.info.width + '×' + it.info.height + ' ' + it.info.vcodec + '/' + it.info.acodec + ' · ' + it.info.duration.toFixed(2) + ' s · ' + mb(it.size) + ' · encode ' + sec(it.encMs) + ' · captions ' + it.caps.lines + ' lines/' + it.caps.words + ' words' + (it.burn ? ' · burn check ' + it.burn.wordPixels + ' px at word vs ' + (it.burn.gapPixels === null ? 'n/a' : it.burn.gapPixels) + ' px at gap → ' + (it.burn.result === 'yes' ? 'visible' : it.burn.result === 'no' ? 'NOT visible' : 'inconclusive (moving picture)') : '') + ' · engine memory ' + (it.wasmMB ? it.wasmMB + ' MB' : 'n/a') + ' · file ' + it.name + (it.warn.length ? ' · WARNINGS: ' + it.warn.join(' | ') : '') + (it.shareNote ? ' · share: ' + it.shareNote : '');
+        else if (it.state === 'failed') t += ' · ' + String(it.error || '').split('\n').slice(0, 3).join(' | ');
+        else if (it.note) t += ' · ' + it.note;
+        L.push(t);
+      }
+      const xv = (n) => { const e = document.querySelector('input[name=' + n + ']:checked'); return e ? e.value : 'not answered'; };
+      L.push('MY EXPORT CHECK: plays=' + xv('xplay') + ' · captions in sync=' + xv('xsync') + ' · saved=' + xv('xsave'));
+    }
+  }
   if (r.checks) L.push('CHECKS: ' + JSON.stringify({ ok: r.checks.clipChecks.ok, problems: r.checks.clipChecks.problems, sync: r.checks.sync }));
   L.push('MEMORY: ' + (run.mem.length ? run.mem.map((m) => m.tag + ' wasm=' + (m.wasmMB || 'n/a')).join(' | ') : 'n/a'));
   L.push('STEP TIMES (ms): ' + JSON.stringify(run.timing));
@@ -416,6 +442,241 @@ function buildReport(ok, errMsg) {
   $('#reportCard').classList.remove('hidden');
 }
 
+/* ---------------- export of the chosen clips ---------------- */
+/* One clip at a time. For each clip a FRESH video engine is started and thrown away afterwards, so the WebAssembly memory
+   (which only ever grows) is handed back before the next clip. The source video is mounted, never copied. The words come from
+   the recognition that already ran; Whisper is not loaded again. */
+function initExport() {
+  run.exp = { items: {}, cancelled: false, font: null, urls: [] };
+  run.all.forEach((c, k) => { run.exp.items[c.id] = { k, state: 'idle', note: '', frac: 0 }; });
+  $('#exportBar').classList.remove('hidden');
+  $('#exportCheck').classList.add('hidden');
+  $('#exportNote').textContent = '';
+  syncExportUi();
+}
+function pickedIndexes() {
+  return run && run.all ? run.all.map((c, k) => k).filter((k) => { const b = $('#pick_' + k); return b && b.checked; }) : [];
+}
+function syncExportUi() {
+  if (!run || !run.exp) return;
+  const todo = pickedIndexes().filter((k) => run.exp.items[run.all[k].id].state !== 'done');
+  const b = $('#btnExport');
+  b.textContent = '⬇ Export selected clips' + (todo.length ? ' (' + todo.length + ')' : '');
+  b.disabled = st.exporting || st.running || !todo.length;
+  b.classList.toggle('hidden', st.exporting);
+  $('#btnExportCancel').classList.toggle('hidden', !st.exporting);
+  document.querySelectorAll('[data-pick]').forEach((x) => { x.disabled = st.exporting; });
+  $('#btnSelAll').disabled = $('#btnSelNone').disabled = st.exporting;
+  const anyDone = run.all.some((c) => run.exp.items[c.id].state === 'done');
+  $('#exportCheck').classList.toggle('hidden', !anyDone);
+}
+function paintItem(c) {
+  const it = run.exp.items[c.id], el = $('#x_' + it.k); if (!el) return;
+  let h = '';
+  if (it.state === 'queued' || it.state === 'working') {
+    h = '<div class="xl">' + esc(it.label || 'Waiting …') + '</div><div class="bar sm"><i style="width:' + Math.round(clamp(it.frac || 0, 0, 1) * 100) + '%"></i></div>';
+  } else if (it.state === 'done') {
+    const capNote = it.caps.lines ? it.caps.lines + ' caption line(s) from ' + it.caps.words + ' recognized word(s)' : 'no captions — no recognized words in this clip';
+    h = '<div class="xdone">✓ Exported · ' + it.info.width + '×' + it.info.height + ' ' + esc(it.info.vcodec) + '/' + esc(it.info.acodec) + ' · ' + it.info.duration.toFixed(1) + ' s · ' + mb(it.size) + ' · ' + esc(capNote) + '</div>' +
+      (it.warn.length ? '<ul class="warnl">' + it.warn.map((w) => '<li>⚠ ' + esc(w) + '</li>').join('') + '</ul>' : '') +
+      '<video class="xvid" controls playsinline preload="metadata" src="' + it.url + '"></video>' +
+      '<a class="btn small" data-dl="' + it.k + '" href="' + it.url + '" download="' + esc(it.name) + '">⬇ Download MP4</a>' +
+      (canShareFiles(it) ? '<button class="btn small" data-share="' + it.k + '">Share / Save …</button>' : '') +
+      '<div class="note" data-shareNote="' + it.k + '">' + esc(it.shareNote || '') + '</div>';
+  } else if (it.state === 'failed') {
+    h = '<div class="xerr">✕ Not exported: ' + esc(it.error || 'unknown error').replace(/\n/g, '<br>') + '</div><div class="note">Nothing was kept for this clip. Tick it and tap Export again to retry.</div>';
+  } else if (it.state === 'cancelled' || it.state === 'skipped') {
+    h = '<div class="note">' + esc(it.note || 'Not exported.') + ' Tick it and tap Export to try again.</div>';
+  }
+  el.innerHTML = h;
+  el.querySelectorAll('[data-share]').forEach((b) => b.addEventListener('click', () => shareClip(Number(b.dataset.share))));
+}
+function canShareFiles(it) {
+  try { return !!(navigator.share && navigator.canShare && navigator.canShare({ files: [new File([it.blob], it.name, { type: 'video/mp4' })] })); } catch (_) { return false; }
+}
+async function shareClip(k) {
+  const c = run.all[k], it = run.exp.items[c.id], note = document.querySelector('[data-shareNote="' + k + '"]');
+  try {
+    await navigator.share({ files: [new File([it.blob], it.name, { type: 'video/mp4' })], title: 'ClipGen clip ' + c.rank });
+    it.shareNote = 'The share sheet was opened. Choose “Save Video” or “Save to Files” in it.';
+  } catch (e) {
+    if (e && e.name === 'AbortError') it.shareNote = 'Share sheet closed without saving.';
+    else it.shareNote = 'The share sheet could not open (' + msg(e) + '). Use “Download MP4” instead.';
+  }
+  if (note) note.textContent = it.shareNote;
+}
+
+async function xExec(eng, ctx, args) {
+  const lines = []; ctx.lines = lines;
+  addLog('$ ffmpeg ' + args.join(' '));
+  const t0 = performance.now();
+  let ret;
+  try { ret = await eng.exec(args); } finally { ctx.lines = null; }
+  if (run.exp.cancelled) throw new Error('Cancelled');
+  return { ret, ms: performance.now() - t0, lines };
+}
+function decodePng(u8) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(new Blob([u8], { type: 'image/png' })); const img = new Image();
+    img.onload = () => {
+      try {
+        const cv = document.createElement('canvas'); cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+        const x = cv.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0);
+        const d = x.getImageData(0, 0, cv.width, cv.height); URL.revokeObjectURL(url); res({ w: cv.width, h: cv.height, data: d.data });
+      } catch (e) { URL.revokeObjectURL(url); rej(e); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('could not decode a preview frame')); };
+    img.src = url;
+  });
+}
+function diffImages(a, b) {
+  if (a.w !== b.w || a.h !== b.h) throw new Error('preview frames differ in size (' + a.w + 'x' + a.h + ' vs ' + b.w + 'x' + b.h + ')');
+  const A = a.data, B = b.data, y0 = Math.round(a.h * BAND.from), y1 = Math.round(a.h * BAND.to);
+  const r = { band: 0, outside: 0, bandPixels: (y1 - y0) * a.w, outsidePixels: (a.h - (y1 - y0)) * a.w };
+  for (let i = 0; i < A.length; i += 4) {
+    if (Math.max(Math.abs(A[i] - B[i]), Math.abs(A[i + 1] - B[i + 1]), Math.abs(A[i + 2] - B[i + 2])) > 40) { const y = Math.floor(i / 4 / a.w); if (y >= y0 && y < y1) r.band++; else r.outside++; }
+  }
+  return r;
+}
+async function grabFrame(eng, ctx, args, outName) {
+  const r = await xExec(eng, ctx, args.concat(['-frames:v', '1', '-y', outName]));
+  if (r.ret !== 0) throw new ExecError('Could not read a frame back from the exported file', r.ret, r.lines);
+  const png = await eng.readFile(outName);
+  try { await eng.deleteFile(outName); } catch (_) { /* ignore */ }
+  return png;
+}
+
+async function exportOne(c, pos) {
+  const exp = run.exp, it = exp.items[c.id];
+  const win = clipWindow(c, run.opts.start, run.dur);
+  if (!win.ok) throw new Error('This clip is too short to export (' + win.len + ' s).');
+  const cap = buildClipCaptions(run.words, win);
+  const ctx = { lines: null, encoding: false };
+  const prefix = 'Clip ' + (pos.index + 1) + ' of ' + pos.total + ': ';
+  const say = (t, frac) => { it.label = prefix + t; if (typeof frac === 'number') it.frac = Math.max(it.frac || 0, frac); paintItem(c); };
+  const out = 'clip_out.mp4', input = '/mnt/input_media';
+  let eng = null;
+  try {
+    say('starting a fresh video engine …', 0.02);
+    try {
+      eng = await createEngine({
+        onLog: (l) => { addLog(l); if (ctx.lines) ctx.lines.push(l); if (ctx.encoding) { const f = progressFromLog(l, win.len); if (f !== null) say('encoding 9:16 with captions … ' + Math.round(f * 100) + '%', 0.1 + f * 0.75); } },
+        onProgress: (d) => { if (ctx.encoding && d && typeof d.progress === 'number' && d.progress >= 0 && d.progress <= 1) say('encoding 9:16 with captions … ' + Math.round(d.progress * 100) + '%', 0.1 + d.progress * 0.75); },
+        onStatus: (s) => { say(s.text); }
+      });
+    } catch (e) { const er = new Error(msg(e)); er.fatal = true; throw er; }
+    st.xEngine = eng;
+    if (exp.cancelled) throw new Error('Cancelled');
+    try {
+      await eng.mkdir('/mnt');
+      await eng.mount('/mnt', { blobs: [{ name: 'input_media', data: run.opts.file }] });          // opened in place, never copied
+    } catch (e) { const er = new Error('Could not open the video without copying it (' + msg(e) + '). Copying a big video into memory could crash Safari, so no export was attempted.'); er.fatal = true; throw er; }
+    say('preparing captions …', 0.06);
+    if (cap.ass) {
+      if (!exp.font) {
+        const r = await fetch(FONT_URL);
+        if (!r.ok) throw new Error('The caption font could not be loaded (HTTP ' + r.status + ').');
+        exp.font = new Uint8Array(await r.arrayBuffer());
+      }
+      try { await eng.mkdir('/fonts'); } catch (_) { /* exists */ }
+      await eng.writeFile('/fonts/font.ttf', exp.font.slice());
+      await eng.writeFile('/sub.ass', new TextEncoder().encode(cap.ass));
+    }
+    ctx.encoding = true; say('encoding 9:16 with captions … 0%', 0.1);
+    const t0 = performance.now();
+    const r = await xExec(eng, ctx, exportArgs({ absStart: win.absStart, len: win.len, input, captions: !!cap.ass, out }));
+    ctx.encoding = false;
+    if (r.ret !== 0) throw new ExecError('FFmpeg could not make this clip', r.ret, r.lines);
+    const encMs = performance.now() - t0;
+
+    say('checking the exported file …', 0.88);
+    const bytes = await eng.readFile(out);
+    const size = bytes ? bytes.length : 0;
+    const blob = new Blob([bytes || new Uint8Array(0)], { type: 'video/mp4' });
+    const info = parseProbe((await xExec(eng, ctx, ['-hide_banner', '-i', out])).lines);        // (FFmpeg prints the file's streams and exits non-zero: expected)
+    const verdict = judgeOutput(info, win.len, size);
+    if (!verdict.ok) throw new Error('The exported file failed its check: ' + verdict.problems.join('; ') + '.');
+    const warn = [];
+    let burn = null;
+    if (cap.ass) {
+      const px = async (t, tag) => diffImages(await decodePng(await grabFrame(eng, ctx, ['-hide_banner', '-ss', String(win.absStart + t), '-i', input, '-vf', VF_BASE], tag + '_p.png')), await decodePng(await grabFrame(eng, ctx, ['-hide_banner', '-ss', String(t), '-i', out], tag + '_o.png')));
+      const word = await px(cap.probe.tWord, 'fw');
+      const gap = cap.probe.tGap !== null ? await px(cap.probe.tGap, 'fg') : null;
+      const result = captionVisibility(word, gap);
+      burn = { tWord: cap.probe.tWord, wordPixels: word.band, wordOutside: +(word.outside / word.outsidePixels).toFixed(3), tGap: cap.probe.tGap, gapPixels: gap ? gap.band : null, result, visible: result === 'yes' };
+      if (result === 'no') warn.push('The automatic check did not see the captions in a test frame. Play the clip before you use it.');
+      else if (result === 'unclear') warn.push('The picture moves a lot between the two frames the automatic caption check compares, so it could not tell. Play the clip to confirm the captions.');
+    } else {
+      await decodePng(await grabFrame(eng, ctx, ['-hide_banner', '-ss', String(Math.min(win.len / 2, Math.max(0, (info.duration || win.len) - 0.2))), '-i', out], 'fm.png'));   // proves the picture can be decoded
+      warn.push('No recognized words fall inside this clip, so it has no captions (nothing is invented).');
+    }
+    if (cap.unsupported.length) warn.push('These characters cannot be drawn by the caption font yet: ' + cap.unsupported.join(' '));
+    if (cap.ass && run.rec.asr && run.rec.asr.timing === 'phrase') warn.push('Word times were estimated from phrase times, so caption timing is less exact.');
+    let wasmMB = null;
+    try { const b = await eng.memInfo(); if (typeof b === 'number' && b > 0) wasmMB = +(b / 1048576).toFixed(0); } catch (_) { /* n/a */ }
+    try { await eng.deleteFile(out); } catch (_) { /* ignore */ }
+
+    const url = URL.createObjectURL(blob);
+    exp.urls.push(url);
+    Object.assign(it, { state: 'done', blob, url, size, info, win, name: safeFileName(run.opts.file.name, c.rank, win), warn, burn, encMs: Math.round(encMs), wasmMB,
+      caps: { lines: cap.lines.length, words: cap.words.length, first: cap.lines.length ? cap.lines[0].start : null, last: cap.lines.length ? cap.lines[cap.lines.length - 1].end : null }, frac: 1, error: '' });
+    return it;
+  } finally {
+    ctx.encoding = false;
+    try { if (eng) eng.terminate(); } catch (_) { /* ignore */ }
+    if (st.xEngine === eng) st.xEngine = null;
+  }
+}
+
+async function startExport() {
+  if (st.exporting || st.running || !run || !run.exp) return;
+  const exp = run.exp;
+  const picks = pickedIndexes().map((k) => run.all[k]).filter((c) => exp.items[c.id].state !== 'done');
+  if (!picks.length) { $('#exportNote').textContent = 'Tick at least one clip that is not exported yet.'; return; }
+  exp.cancelled = false; exp.finished = null; st.exporting = true; exp.t0 = performance.now();
+  for (const c of picks) Object.assign(exp.items[c.id], { state: 'queued', label: 'Waiting for its turn …', frac: 0, error: '', note: '' });
+  picks.forEach(paintItem);
+  patchFlag({ step: 'export', version: VERSION, model: run.opts.model, start: run.opts.start, len: run.opts.len, file: { name: run.opts.file.name, size: run.opts.file.size }, chunk: null, exp: { k: 0, n: picks.length }, hiddenCount: 0, hiddenMs: 0, hiddenNow: false, hiddenSince: null, unloaded: false });
+  try { if ('wakeLock' in navigator) exp.wake = await navigator.wakeLock.request('screen'); } catch (_) { /* optional */ }
+  syncExportUi();
+  $('#exportNote').textContent = 'Exporting ' + picks.length + ' clip(s), one at a time. Keep Safari open on this page with the screen on.';
+  let res;
+  try {
+    res = await runExportQueue({
+      items: picks, isCancelled: () => exp.cancelled,
+      exportOne: (c, pos) => exportOne(c, pos),
+      onState: (c, state, info) => {
+        const it = exp.items[c.id];
+        if (state === 'working') { it.state = 'working'; it.label = 'Clip ' + (info.index + 1) + ' of ' + info.total + ': starting …'; it.frac = 0; patchFlag({ exp: { k: info.index, n: info.total, id: c.id } }); }
+        else if (state === 'failed') { it.state = 'failed'; it.error = info.error; }
+        else if (state === 'cancelled' || state === 'skipped') { it.state = state; it.note = info.note; }
+        paintItem(c); syncExportUi();
+      }
+    });
+  } catch (e) {
+    res = { done: [], failed: [], cancelled: [], skipped: [] };
+    $('#exportNote').textContent = 'The export stopped unexpectedly: ' + msg(e);
+  }
+  exp.finished = { done: res.done.length, failed: res.failed.length, cancelled: res.cancelled.length, skipped: res.skipped.length, ms: Math.round(performance.now() - exp.t0) };
+  clearFlag();
+  try { if (exp.wake) exp.wake.release(); } catch (_) { /* ignore */ }
+  try { if (run.wake) run.wake.release(); } catch (_) { /* ignore */ }
+  st.exporting = false; st.xEngine = null;
+  const f = exp.finished;
+  $('#exportNote').textContent = f.done + ' of ' + picks.length + ' clip(s) exported' + (f.failed ? ', ' + f.failed + ' failed (see the card)' : '') + (f.cancelled ? ', ' + f.cancelled + ' cancelled' : '') + (f.skipped ? ', ' + f.skipped + ' not tried' : '') + '.' + (f.done ? ' Use “Download MP4” on each clip.' : '');
+  syncExportUi();
+  buildReport(run.ok, run.err);
+}
+function cancelExport() {
+  if (!st.exporting || !run || !run.exp) return;
+  run.exp.cancelled = true;
+  $('#exportNote').textContent = 'Cancelling … clips already finished are kept.';
+  try { if (st.xEngine) st.xEngine.terminate(); } catch (_) { /* ignore */ }
+}
+function revokeExportUrls() {
+  if (run && run.exp) { for (const u of run.exp.urls) { try { URL.revokeObjectURL(u); } catch (_) { /* ignore */ } } run.exp.urls = []; }
+}
+
 /* ---------------- run control ---------------- */
 function cleanup() {
   clearInterval(st.timer); st.timer = null;
@@ -424,7 +685,7 @@ function cleanup() {
   st.rec = null;
 }
 async function start() {
-  if (st.running) return;
+  if (st.running || st.exporting) return;
   const file = $('#file').files[0];
   if (!file) return;
   const num = (id, d, a, b) => { const v = Number($('#' + id).value); return Number.isFinite(v) ? clamp(v, a, b) : d; };
@@ -432,6 +693,7 @@ async function start() {
     file, model: $('#model').value, start: num('startSec', 0, 0, 100000), len: num('lenSec', 60, 5, MAX_WINDOW),
     numClips: Math.round(num('numClips', 3, 1, 10)), minLen: num('minLen', 10, 5, 120), maxLen: num('maxLen', 30, 8, 180), intensity: $('#intensity').value
   };
+  revokeExportUrls();                       // clips exported from an earlier analysis are released
   if (st.videoUrl) { try { URL.revokeObjectURL(st.videoUrl); } catch (_) { /* ignore */ } st.videoUrl = null; $('#vid').removeAttribute('src'); }
   run = { opts, rec: { version: VERSION }, steps: {}, timing: {}, errors: [], mem: [], t0: performance.now(), cancelled: false, current: null, frac: 0, label: 'Starting …', clips: [] };
   st.running = true;
@@ -463,6 +725,7 @@ async function start() {
   run.label = ok ? 'Done.' : (run.cancelled ? 'Cancelled.' : 'Stopped.');
   if (ok) $('#pfill').style.width = '100%';
   cleanup();
+  run.pcm = null;                           // the audio is only needed during analysis; free it before any export
   st.running = false;
   $('#btnRun').classList.remove('hidden'); $('#btnCancel').classList.add('hidden');
   paint();
@@ -496,7 +759,7 @@ function readDuration(file) {
 }
 /* the phone locking or Safari going to the background can suspend or kill the run: record it, and get the screen-lock back */
 function onVisibility() {
-  if (!st.running) return;
+  if (!st.running && !st.exporting) return;
   if (document.visibilityState === 'hidden' && flag.unloaded) return;     // browsers fire pagehide, THEN hidden, when a page is closed or reloaded
   if (document.visibilityState === 'hidden') patchFlag({ hiddenNow: true, hiddenSince: Date.now(), hiddenCount: (flag.hiddenCount || 0) + 1 });
   else {
@@ -509,15 +772,16 @@ function showRecovery() {
   const f = readFlag();
   if (!f || !f.step) { clearFlag(); return; }
   clearFlag();
-  const stepName = (STEPS.find((s) => s[0] === f.step) || [])[1] || f.step;
+  const stepName = f.step === 'export' ? 'Export clips' : (STEPS.find((s) => s[0] === f.step) || [])[1] || f.step;
   const lines = [];
-  lines.push('It stopped during “' + stepName + '”' + (f.chunk && f.chunk.n && (f.step === 'asr') ? ', speech part ' + (f.chunk.k + 1) + ' of ' + f.chunk.n : '') + (f.file ? ' (' + f.file.name + ', ' + f.model + ')' : '') + '.');
+  lines.push('It stopped during “' + stepName + '”' + (f.chunk && f.chunk.n && (f.step === 'asr') ? ', speech part ' + (f.chunk.k + 1) + ' of ' + f.chunk.n : '') + (f.step === 'export' && f.exp ? ', clip ' + (f.exp.k + 1) + ' of ' + f.exp.n : '') + (f.file ? ' (' + f.file.name + ', ' + f.model + ')' : '') + '.');
   if (f.hiddenNow) lines.push('Safari was in the background or the phone was locked at that moment — iPhone can stop a page there. Keep Safari open on this page with the screen on until it finishes.');
   else if (f.unloaded) lines.push('The page was closed or reloaded' + (f.hiddenCount ? ' (it had also been in the background ' + f.hiddenCount + '× during the run)' : '') + ' — by you, or by Safari. If you did not do it, Safari probably ran out of memory.');
   else if (f.hiddenCount) lines.push('The page had been in the background ' + f.hiddenCount + '× during the run, and then stopped without warning (Safari most likely ran out of memory).');
   else lines.push('The page was in front and stopped without warning, so Safari most likely ran out of memory. Close other apps and tabs and try again.');
   const ck = ckptStore.load(); const saved = ck && ck.results ? Object.keys(ck.results).length : 0;
-  if (saved) lines.push(saved + ' speech part(s) were saved. Choose the same video again with the same settings and tap Find highlights — those parts are reused, so it continues instead of starting over.');
+  if (f.step === 'export') lines.push('Clips you had already downloaded are safe in Files. To export again: choose the same video, tap Find highlights (speech is recognized again, about a minute), then export ONE clip at a time and close other apps and tabs first.');
+  else if (saved) lines.push(saved + ' speech part(s) were saved. Choose the same video again with the same settings and tap Find highlights — those parts are reused, so it continues instead of starting over.');
   else lines.push('Nothing was saved yet. Choose your video again and tap Find highlights.');
   if (f.start !== undefined && !$('#startSec').value) { /* defaults stay */ }
   const b = $('#crashBanner'); b.classList.remove('hidden');
@@ -544,15 +808,19 @@ function boot() {
     catch (_) { $('#report').select(); $('#btnCopy').textContent = 'Select all and copy manually'; }
     setTimeout(() => { $('#btnCopy').textContent = 'Copy report'; }, 2500);
   });
-  document.querySelectorAll('input[name=mine]').forEach((r) => r.addEventListener('change', () => { if (run && !st.running) buildReport(run.ok, run.err); }));
+  document.querySelectorAll('input[name=mine],input[name=xplay],input[name=xsync],input[name=xsave]').forEach((r) => r.addEventListener('change', () => { if (run && !st.running) buildReport(run.ok, run.err); }));
+  $('#btnExport').addEventListener('click', startExport);
+  $('#btnExportCancel').addEventListener('click', cancelExport);
+  $('#btnSelAll').addEventListener('click', () => { document.querySelectorAll('[data-pick]').forEach((b) => { b.checked = true; }); syncExportUi(); });
+  $('#btnSelNone').addEventListener('click', () => { document.querySelectorAll('[data-pick]').forEach((b) => { b.checked = false; }); syncExportUi(); });
   document.addEventListener('visibilitychange', onVisibility);
   // a normal reload/close also fires "hidden" right before pagehide: do not mistake that for the app being backgrounded
   window.addEventListener('pagehide', () => {
-    if (!st.running) return;
+    if (!st.running && !st.exporting) return;
     const own = flag.hiddenSince && Date.now() - flag.hiddenSince < 300;
     patchFlag(Object.assign({ unloaded: true }, own ? { hiddenNow: false, hiddenSince: null, hiddenCount: Math.max(0, (flag.hiddenCount || 0) - 1) } : {}));
   });
   showRecovery();
-  window.__highlightsTest = { get run() { return run; } };
+  window.__highlightsTest = { get run() { return run; }, get exp() { return run && run.exp; } };
 }
 boot();

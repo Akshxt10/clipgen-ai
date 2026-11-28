@@ -57,7 +57,7 @@ The cause on that phone is NOT confirmed (the sandbox cannot see iPhone memory).
 - Scores are **heuristics**, not human judgement. The automatic checks prove the clips are well-formed, not that they are good.
   Whether they are good highlights is your call (the page asks).
 - English cue lists (hooks, emotions …). Other languages fall back mostly to loudness/rate.
-- No scene-cut signal yet. No export of a chosen clip yet (next step) — this page only finds and previews.
+- No scene-cut signal yet.
 - If nothing qualifies, the page relaxes the settings step by step and tells you; if it still finds nothing it says so.
 - If no usable transcript, it uses loudness only and labels the result.
 - Window is capped at 600 s per run; recognition speed on a phone is measured by the report, not assumed.
@@ -68,3 +68,26 @@ The cause on that phone is NOT confirmed (the sandbox cannot see iPhone memory).
 - `page.test.mjs`: the real page in headless Chromium with stand-ins (native ffmpeg for the engine, fixture words for the recognizer).
   Also: offset start, nothing recognized, short clip, silent video, blocked CDN, no audio track.
 Real Whisper recognition and the quality of picks on real content are **not** testable in the sandbox.
+
+## Step 2 — export the chosen clips as 9:16 MP4s (`export.js`, new)
+Each clip card has an **Export this clip** tick box (strong clips ticked, weaker ones not), then **Export selected clips**.
+For every ticked clip, on the phone, nothing uploaded:
+1. **Cut** from the original video at the clip's exact start/end (analysis start + clip start; the length is floored, so it never runs past the requested end or past the analysed part).
+2. **9:16, 720×1280** with the same centre-crop + scale filter as the passed speech-caption export.
+3. **Captions** from the words Whisper already recognized (no second recognition). Words are shifted so the clip starts at 0 s; a word belongs to a clip when its middle lies inside it;
+   times are clamped to the clip, so no caption can appear before its speech or outlive the clip. Same ASS/libass karaoke captions and bundled Poppins font as the passed export.
+   No words inside a clip → exported without captions and the card says so (nothing is invented).
+4. **H.264/AAC MP4**: the encoder arguments are identical to the passed export (a test compares them token by token against `phase0-speech/app.js`).
+5. **Checked before it is offered**: the file's size/codecs/length are read back (must be 720×1280 H.264/AAC, never longer than requested), one frame is decoded from the output, and
+   a caption-visibility check compares an exported frame with the same source frame (it says "inconclusive" for fast-moving pictures instead of guessing). A clip that fails the check shows an error and **no** download.
+6. **Download MP4** (a normal download link with a real file name; iPhone Safari puts it in Files → Downloads) and, only if the browser supports sharing files, **Share / Save …** which opens the share sheet
+   (normally with “Save Video” for Photos and “Save to Files”). **Direct saving to Photos is not implemented**, and neither the download nor the share sheet has been confirmed on a real iPhone yet.
+
+Memory: one clip at a time; a **fresh video engine per clip, terminated afterwards** (WebAssembly memory only grows, so this is how it is handed back); the source is mounted in place, never copied
+(if mounting fails the export refuses rather than copying a big video); Whisper is not loaded; the analysis audio is freed before export; each finished clip is kept only as a file (Blob), not as extra buffers.
+Cancel keeps finished clips and drops the running one. A failed clip does not stop the others; **Export** again retries only what is missing. If the engine cannot start at all, the rest are not tried.
+If Safari kills the tab during export, the next load says which clip it was. Limit: after a finished analysis the saved speech parts are cleared, so after a crash the video must be analysed again (about a minute) before exporting.
+
+Tests: `tests/export.test.mjs` (maths, the Phase 0 filter/encoder drift guard, queue logic, and NATIVE ffmpeg/libass + OCR proving exact start/end by picture and audio, 720×1280 H.264/AAC, caption times on the clip clock, no captions outside)
+and `tests/export.page.test.mjs` (the real page in Chromium: select, export, real MP4 files, download link bytes, sequential engines, cancel, failure + retry, no-words clip, share stub, crash message).
+Stand-ins: native ffmpeg instead of FFmpeg.wasm, fixture words instead of Whisper. They do not prove behaviour on an iPhone.

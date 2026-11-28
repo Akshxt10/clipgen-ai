@@ -10,7 +10,7 @@
 <body>
 <main>
   <h1>ClipGen AI · Find highlights</h1>
-  <p class="sub">Phase 1 · step 1. Your video → on-device speech recognition + loudness → ranked highlight moments you can preview. Nothing is uploaded.</p>
+  <p class="sub">Phase 1. Your video → on-device speech recognition + loudness → ranked highlight moments you can preview and export as 9:16 captioned MP4s. Nothing is uploaded.</p>
 
   <div id="crashBanner" class="banner bad hidden"></div>
 
@@ -52,6 +52,25 @@
     <p class="note">Loudness over the analysed part. Coloured bands are the suggested clips.</p>
     <video id="vid" controls playsinline preload="metadata"></video>
     <div id="clips"></div>
+    <div id="exportBar" class="exportbar hidden">
+      <h3>Export clips as videos</h3>
+      <p class="note">Tick the clips you want, then export. Each one is cut from your original video, made vertical 9:16 (720×1280) with the words recognized in it burned in as captions, and saved as an MP4 on this phone. One clip at a time. Nothing is uploaded.</p>
+      <button id="btnSelAll" class="btn small" type="button">Select all</button><button id="btnSelNone" class="btn small" type="button">Select none</button>
+      <button id="btnExport" class="btn" type="button" disabled>⬇ Export selected clips</button>
+      <button id="btnExportCancel" class="btn danger hidden" type="button">■ Cancel export</button>
+      <p class="note" id="exportNote"></p>
+      <p class="note">Saving on iPhone: “Download MP4” puts the file in Files → Downloads. “Share / Save …” (shown only when your browser supports it) opens the share sheet, which normally offers “Save Video” for Photos and “Save to Files”. Neither has been confirmed on a real iPhone yet — your report below tells me.</p>
+    </div>
+    <div id="exportCheck" class="hidden">
+      <h3>Your export check</h3>
+      <p class="note">After you download a clip, tell me what happened.</p>
+      <p class="note" style="margin:6px 0 0">Does the exported video play?</p>
+      <div><label class="radio"><input type="radio" name="xplay" value="yes"> Yes</label><label class="radio"><input type="radio" name="xplay" value="no"> No</label></div>
+      <p class="note" style="margin:6px 0 0">Are the captions in sync with the voice?</p>
+      <div><label class="radio"><input type="radio" name="xsync" value="yes"> Yes</label><label class="radio"><input type="radio" name="xsync" value="mostly"> Mostly</label><label class="radio"><input type="radio" name="xsync" value="no"> No</label></div>
+      <p class="note" style="margin:6px 0 0">Could you save it (Files or Photos)?</p>
+      <div><label class="radio"><input type="radio" name="xsave" value="files"> Files</label><label class="radio"><input type="radio" name="xsave" value="photos"> Photos</label><label class="radio"><input type="radio" name="xsave" value="no"> Could not</label></div>
+    </div>
     <h3>Your check</h3>
     <p class="note">Preview the clips. Do the top picks look like moments you would really post?</p>
     <div class="row">

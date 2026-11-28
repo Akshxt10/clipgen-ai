@@ -39,3 +39,11 @@ a{color:var(--accent)}summary{cursor:pointer;color:var(--mute)}
 canvas#wave{width:100%;height:70px;display:block;background:#0e1120;border-radius:8px}
 .ok-t{color:var(--ok)}.bad-t{color:var(--bad)}
 .clip ul.warnl{color:var(--warn)}
+
+.pick{display:flex;align-items:center;gap:10px;margin:0 0 6px;font-size:15px;color:var(--txt)}
+.pick input{width:22px;height:22px}
+.exportbar{border-top:1px solid var(--line);margin-top:14px}
+.bar.sm{height:6px;margin:6px 0}
+.xstat{margin-top:8px}.xstat .xl{font-size:14px;color:var(--mute)}
+.xdone{color:var(--ok);font-size:14px;margin:6px 0}.xerr{color:var(--bad);font-size:14px;margin:6px 0}
+video.xvid{max-height:50vh;margin:8px 0}
